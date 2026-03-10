@@ -16,7 +16,7 @@
   <header class="app-header">
     <div>
       <h1>单词记忆轻程序</h1>
-      <p class="sub">iPhone 稳定版：PWA + IndexedDB + JSON 备份</p>
+      <p class="sub">PWA + IndexedDB + JSON 备份</p>
     </div>
   </header>
 
@@ -50,21 +50,12 @@
         <div class="section-title">今天待复习批次</div>
         <div id="batchSummary"></div>
       </article>
-
-      <article class="card">
-        <div class="section-title">使用说明</div>
-        <div class="tips">
-          <p>1. 先录入单词，再进入“复习”。</p>
-          <p>2. 先看中文，自己说英文，再点“显示答案”。</p>
-          <p>3. 评分按钮会自动推算下次复习日期。</p>
-          <p>4. 建议定期导出 JSON 备份。</p>
-        </div>
-      </article>
     </section>
 
     <section id="review" class="view">
       <article class="card review-card">
-        <div class="section-title">口语友好复习模式</div>
+        <div class="section-title" id="reviewSectionTitle">口语友好复习模式</div>
+        <div id="reviewBanner" class="banner hidden"></div>
         <p id="reviewEmpty" class="muted">今天还没有待复习内容。</p>
         <div id="reviewBox" class="hidden">
           <p class="muted">请先根据中文/场景回忆英文</p>
@@ -112,29 +103,62 @@
         <input id="tagInput" placeholder="口语, 工作" />
 
         <div class="button-row wrap">
-          <button class="btn primary" id="addWordBtn">添加 1 个单词</button>
+          <button class="btn primary" id="addWordBtn">添加到今天</button>
           <button class="btn" id="addBatchDemoBtn">导入 5 个示例</button>
         </div>
 
-        <p class="muted small">新录入单词默认进入今天批次，首次复习安排在今天（0 天）。</p>
+        <p class="muted small">这里默认把新词录入到今天；如果你想补录到其他日期，请到“日历”页操作。</p>
       </article>
     </section>
 
     <section id="calendarTab" class="view">
       <article class="card">
-        <div class="calendar-toolbar">
-          <button class="btn" id="prevMonthBtn">上个月</button>
-          <strong id="calendarTitle"></strong>
-          <button class="btn" id="nextMonthBtn">下个月</button>
+        <div class="calendar-head">
+          <div>
+            <div class="section-title" id="calendarTitle">日历</div>
+            <div class="small muted">点某一天后，可查看当天录入单词、补录、编辑、删除，并从该日批次进入复习。</div>
+          </div>
+          <div class="calendar-controls">
+            <select id="calendarYearSelect"></select>
+            <select id="calendarMonthSelect"></select>
+            <button class="btn small-btn" id="prevMonthBtn">上个月</button>
+            <button class="btn small-btn" id="nextMonthBtn">下个月</button>
+          </div>
         </div>
+        <div class="selected-date-chip">当前选中：<span id="selectedDateLabel"></span></div>
         <div class="calendar" id="calendarGrid"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-title" id="selectedDateTitle">当天录入的单词</div>
+        <div class="button-row wrap no-top-margin">
+          <button class="btn primary" id="reviewSelectedBatchBtn">进入该日批次复习</button>
+        </div>
+
+        <div class="inline-form" id="calendarAddForm">
+          <div class="section-subtitle">向这一天新增单词</div>
+          <label for="calendarWordInput">英文单词</label>
+          <input id="calendarWordInput" autocapitalize="off" autocomplete="off" spellcheck="false" />
+          <label for="calendarMeaningInput">中文释义</label>
+          <input id="calendarMeaningInput" />
+          <label for="calendarExampleInput">例句（可选）</label>
+          <textarea id="calendarExampleInput"></textarea>
+          <label for="calendarTagInput">标签（逗号分隔）</label>
+          <input id="calendarTagInput" />
+          <div class="button-row wrap">
+            <button class="btn primary" id="addWordToSelectedDateBtn">添加到这一天</button>
+          </div>
+        </div>
+
+        <div id="selectedDateWords" class="list-stack"></div>
       </article>
     </section>
 
     <section id="library" class="view">
       <article class="card">
         <div class="section-title">词库</div>
-        <div id="libraryList" class="list-stack"></div>
+        <div class="small muted">支持编辑和删除。</div>
+        <div id="libraryList" class="list-stack" style="margin-top: 12px;"></div>
       </article>
     </section>
 
@@ -168,7 +192,7 @@
           <button class="btn danger-outline" id="clearDemoBtn">清空全部数据</button>
         </div>
 
-        <p class="muted small">评分规则：Easy = 阶段 +2；Good = 阶段 +1；Hard = 原地并安排明天；Again = 回到阶段 0 并安排今天。</p>
+        <p class="muted small">当前版本说明：今日页 / 复习页 / 日历中的“待复习”按固定间隔批次计算，即统计 0、1、3、7、14、30 天前录入的新词。</p>
       </article>
     </section>
   </main>
@@ -200,6 +224,12 @@
 
       <label for="editTagInput">标签（逗号分隔）</label>
       <input id="editTagInput" />
+
+      <label for="editCreatedAtInput">录入日期</label>
+      <input id="editCreatedAtInput" type="date" />
+
+      <label for="editNextReviewDateInput">下次复习日期（保留字段）</label>
+      <input id="editNextReviewDateInput" type="date" />
 
       <div class="button-row wrap">
         <button class="btn primary" id="saveEditBtn">保存修改</button>
