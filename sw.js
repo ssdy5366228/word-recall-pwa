@@ -1,4 +1,4 @@
-const CACHE_NAME = 'word-recall-pwa-v2';
+const CACHE_NAME = 'word-recall-pwa-v3';
 const ASSETS = ['./','./index.html','./styles.css','./app.js','./manifest.webmanifest','./icon-180.png','./icon-512.png'];
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
