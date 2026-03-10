@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="单词记忆" />
+  <title>单词记忆轻程序 PWA</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="./icon-180.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>单词记忆轻程序</h1>
+      <p class="sub">iPhone 稳定版：PWA + IndexedDB + JSON 备份</p>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <section id="dashboard" class="view active">
+      <div class="stats-grid">
+        <article class="card stat-card">
+          <div class="label">今日待复习</div>
+          <div class="value" id="todayDueCount">0</div>
+        </article>
+        <article class="card stat-card">
+          <div class="label">今日新词目标</div>
+          <div class="value" id="todayNewQuota">10</div>
+        </article>
+        <article class="card stat-card">
+          <div class="label">错词累计</div>
+          <div class="value" id="hardWordCount">0</div>
+        </article>
+        <article class="card stat-card">
+          <div class="label">总词数</div>
+          <div class="value" id="totalWordCount">0</div>
+        </article>
+      </div>
+
+      <article class="card">
+        <div class="section-title">今日计划</div>
+        <div id="todayPlan"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">今天待复习批次</div>
+        <div id="batchSummary"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">使用说明</div>
+        <div class="tips">
+          <p>1. 先录入单词，再进入“复习”。</p>
+          <p>2. 先看中文，自己说英文，再点“显示答案”。</p>
+          <p>3. 评分按钮会自动推算下次复习日期。</p>
+          <p>4. 建议定期导出 JSON 备份。</p>
+        </div>
+      </article>
+    </section>
+
+    <section id="review" class="view">
+      <article class="card review-card">
+        <div class="section-title">口语友好复习模式</div>
+        <p id="reviewEmpty" class="muted">今天还没有待复习内容。</p>
+        <div id="reviewBox" class="hidden">
+          <p class="muted">请先根据中文/场景回忆英文</p>
+          <div class="prompt" id="reviewPrompt"></div>
+          <div class="meta" id="reviewMeta"></div>
+
+          <label for="spellingAttempt">可选：先自己拼写，再看答案</label>
+          <input id="spellingAttempt" placeholder="输入你回忆出的英文" autocapitalize="off" autocomplete="off" spellcheck="false" />
+
+          <div class="button-row">
+            <button class="btn primary" id="showAnswerBtn">显示答案</button>
+            <button class="btn" id="skipBtn">跳过</button>
+          </div>
+
+          <div id="answerBox" class="answer-box hidden">
+            <p><strong>答案：</strong><span id="answerWord"></span></p>
+            <p><strong>释义：</strong><span id="answerMeaning"></span></p>
+            <p><strong>例句：</strong><span id="answerExample"></span></p>
+            <p><strong>你的拼写：</strong><span id="attemptResult"></span></p>
+          </div>
+
+          <div class="button-row hidden" id="rateButtons">
+            <button class="btn easy" data-rating="Easy">Easy</button>
+            <button class="btn good" data-rating="Good">Good</button>
+            <button class="btn hard" data-rating="Hard">Hard</button>
+            <button class="btn again" data-rating="Again">Again</button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section id="add" class="view">
+      <article class="card">
+        <div class="section-title">录入单词</div>
+        <label for="wordInput">英文单词</label>
+        <input id="wordInput" placeholder="例如 negotiate" autocapitalize="off" autocomplete="off" spellcheck="false" />
+
+        <label for="meaningInput">中文释义</label>
+        <input id="meaningInput" placeholder="例如 谈判；协商" />
+
+        <label for="exampleInput">例句（可选）</label>
+        <textarea id="exampleInput" placeholder="例如 We need to negotiate a better price."></textarea>
+
+        <label for="tagInput">标签（逗号分隔，如 口语,工作,旅行）</label>
+        <input id="tagInput" placeholder="口语, 工作" />
+
+        <div class="button-row wrap">
+          <button class="btn primary" id="addWordBtn">添加 1 个单词</button>
+          <button class="btn" id="addBatchDemoBtn">导入 5 个示例</button>
+        </div>
+
+        <p class="muted small">新录入单词默认进入今天批次，首次复习安排在今天（0 天）。</p>
+      </article>
+    </section>
+
+    <section id="calendarTab" class="view">
+      <article class="card">
+        <div class="calendar-toolbar">
+          <button class="btn" id="prevMonthBtn">上个月</button>
+          <strong id="calendarTitle"></strong>
+          <button class="btn" id="nextMonthBtn">下个月</button>
+        </div>
+        <div class="calendar" id="calendarGrid"></div>
+      </article>
+    </section>
+
+    <section id="library" class="view">
+      <article class="card">
+        <div class="section-title">词库</div>
+        <div id="libraryList" class="list-stack"></div>
+      </article>
+    </section>
+
+    <section id="log" class="view">
+      <article class="card">
+        <div class="section-title">运行记录</div>
+        <div id="logList" class="list-stack"></div>
+      </article>
+    </section>
+
+    <section id="settings" class="view">
+      <article class="card">
+        <div class="section-title">设置</div>
+
+        <label for="dailyQuotaSelect">每日新词数量</label>
+        <select id="dailyQuotaSelect">
+          <option value="10">10</option>
+          <option value="5">5</option>
+        </select>
+
+        <label for="intervalInput">复习间隔（天，逗号分隔）</label>
+        <input id="intervalInput" value="0,1,3,7,14,30" inputmode="numeric" />
+
+        <div class="button-row wrap">
+          <button class="btn primary" id="saveSettingsBtn">保存设置</button>
+          <button class="btn" id="exportBtn">导出 JSON</button>
+          <label class="btn file-btn">
+            导入 JSON
+            <input type="file" id="importInput" accept="application/json" hidden />
+          </label>
+          <button class="btn danger-outline" id="clearDemoBtn">清空全部数据</button>
+        </div>
+
+        <p class="muted small">评分规则：Easy = 阶段 +2；Good = 阶段 +1；Hard = 原地并安排明天；Again = 回到阶段 0 并安排今天。</p>
+      </article>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button data-tab="dashboard" class="active">今日</button>
+    <button data-tab="review">复习</button>
+    <button data-tab="add">录入</button>
+    <button data-tab="calendarTab">日历</button>
+    <button data-tab="library">词库</button>
+    <button data-tab="log">记录</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
