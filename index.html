@@ -185,6 +185,29 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <div id="editModal" class="modal hidden">
+    <div class="modal-backdrop" id="editBackdrop"></div>
+    <div class="modal-panel">
+      <div class="modal-title">编辑单词</div>
+      <label for="editWordInput">英文单词</label>
+      <input id="editWordInput" autocapitalize="off" autocomplete="off" spellcheck="false" />
+
+      <label for="editMeaningInput">中文释义</label>
+      <input id="editMeaningInput" />
+
+      <label for="editExampleInput">例句（可选）</label>
+      <textarea id="editExampleInput"></textarea>
+
+      <label for="editTagInput">标签（逗号分隔）</label>
+      <input id="editTagInput" />
+
+      <div class="button-row wrap">
+        <button class="btn primary" id="saveEditBtn">保存修改</button>
+        <button class="btn" id="cancelEditBtn">取消</button>
+      </div>
+    </div>
+  </div>
+
   <script src="./app.js" defer></script>
 </body>
 </html>
