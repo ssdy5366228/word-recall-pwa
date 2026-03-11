@@ -26,6 +26,7 @@ let exportPreviewText = '';
 let exportDownloadUrl = '';
 let pendingImportState = null;
 let pendingImportPreview = null;
+let librarySearch = '';
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -99,6 +100,15 @@ function chunk(arr, size) {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
+}
+
+function shuffleArray(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 }
 
 function ratingRank(rating) {
@@ -304,6 +314,7 @@ function startNormalReviewSession() {
     selectedRating: '',
     completed: false,
     roundRatings: {},
+    batchOrders: {},
   };
 }
 
@@ -321,6 +332,7 @@ function startWrongBookSession() {
     selectedRating: '',
     completed: false,
     roundCompleted: false,
+    batchOrders: {},
   };
 }
 
@@ -348,7 +360,13 @@ function ensureWrongBookSession() {
 function getSessionBatch(session) {
   const queue = session.queueIds.map(id => state.words.find(word => word.id === id) || getWrongBookItems().find(word => word.id === id)).filter(Boolean);
   const batches = chunk(queue, session.batchSize);
-  const batch = batches[session.batchIndex] || [];
+  const baseBatch = batches[session.batchIndex] || [];
+  const orderKey = `${session.phase}_${session.batchIndex}`;
+  session.batchOrders = session.batchOrders || {};
+  if (!session.batchOrders[orderKey]) {
+    session.batchOrders[orderKey] = shuffleArray(baseBatch.map(word => word.id));
+  }
+  const batch = session.batchOrders[orderKey].map(id => baseBatch.find(word => word.id === id)).filter(Boolean);
   return { queue, batches, batch, item: batch[session.wordIndex] || null };
 }
 
@@ -737,8 +755,20 @@ function attachWordCardEvents(container) {
 
 function renderLibrary() {
   const container = document.getElementById('libraryList');
-  const words = [...state.words].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.word.localeCompare(b.word));
-  container.innerHTML = words.length ? words.map(renderWordCardHtml).join('') : '<div class="muted">词库为空。</div>';
+  const countEl = document.getElementById('librarySearchCount');
+  const inputEl = document.getElementById('librarySearchInput');
+  if (inputEl) inputEl.value = librarySearch;
+  const q = librarySearch.trim().toLowerCase();
+  let words = [...state.words].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.word.localeCompare(b.word));
+  if (q) {
+    words = words.filter(word => [word.word, word.meaning, word.example, ...(word.tags || [])].some(value => String(value || '').toLowerCase().includes(q)));
+    countEl.textContent = `当前匹配词条：${words.length}`;
+    countEl.classList.remove('hidden');
+  } else {
+    countEl.textContent = '';
+    countEl.classList.add('hidden');
+  }
+  container.innerHTML = words.length ? words.map(renderWordCardHtml).join('') : '<div class="muted">未找到匹配词条。</div>';
   attachWordCardEvents(container);
 }
 
@@ -982,6 +1012,16 @@ function bindEvents() {
     showToast('已导入 5 个示例');
   });
   document.getElementById('addWordToSelectedDateBtn').addEventListener('click', handleAddWordToSelectedDate);
+
+  document.getElementById('librarySearchInput').addEventListener('input', (e) => {
+    librarySearch = e.target.value || '';
+    renderLibrary();
+  });
+  document.getElementById('librarySearchClearBtn').addEventListener('click', () => {
+    librarySearch = '';
+    document.getElementById('librarySearchInput').value = '';
+    renderLibrary();
+  });
 
   document.getElementById('reviewSelectedBatchBtn').addEventListener('click', () => {
     reviewContext = { type: 'batch', sourceDate: selectedDate };
