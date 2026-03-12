@@ -1,13 +1,13 @@
-const CACHE_NAME = 'word-recall-pwa-5.2';
+const CACHE_NAME = 'word-recall-pwa-5.3';
 const ASSETS = [
   './',
   './index.html',
-  './index.html?v=5.2',
-  './styles.css?v=5.2',
-  './app.js?v=5.2',
-  './manifest.webmanifest?v=5.2',
-  './icon-180.png?v=5.2',
-  './icon-512.png?v=5.2'
+  './index.html?v=5.3',
+  './styles.css?v=5.3',
+  './app.js?v=5.3',
+  './manifest.webmanifest?v=5.3',
+  './icon-180.png?v=5.3',
+  './icon-512.png?v=5.3'
 ];
 
 self.addEventListener('install', (event) => {

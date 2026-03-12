@@ -5,4 +5,4 @@
 This package uses cache-busting fixes for 5.1.1.
 
 
-v5.2 adds duplicate-entry prevention across the whole library.
+v5.3 adds duplicate-entry prevention across the whole library.

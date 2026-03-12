@@ -2,6 +2,7 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
+const APP_VERSION = 'v5.3';
 
 const defaultState = {
   settings: {
@@ -27,6 +28,7 @@ let exportDownloadUrl = '';
 let pendingImportState = null;
 let pendingImportPreview = null;
 let librarySearch = '';
+let showWrongList = false;
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -325,6 +327,7 @@ function startNormalReviewSession() {
     completed: false,
     roundRatings: {},
     batchOrders: {},
+    autoAgainReady: false,
   };
 }
 
@@ -343,6 +346,7 @@ function startWrongBookSession() {
     completed: false,
     roundCompleted: false,
     batchOrders: {},
+    autoAgainReady: false,
   };
 }
 
@@ -368,7 +372,9 @@ function ensureWrongBookSession() {
 }
 
 function getSessionBatch(session) {
-  const queue = session.queueIds.map(id => state.words.find(word => word.id === id) || getWrongBookItems().find(word => word.id === id)).filter(Boolean);
+  const queue = session.type === 'wrongbook'
+    ? session.queueIds.map(id => getWrongBookItems().find(word => word.id === id)).filter(Boolean)
+    : session.queueIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
   const batches = chunk(queue, session.batchSize);
   const baseBatch = batches[session.batchIndex] || [];
   const orderKey = `${session.phase}_${session.batchIndex}`;
@@ -395,7 +401,9 @@ function renderDashboard() {
     <p>${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个新词。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
   `;
   document.getElementById('batchSummary').innerHTML = batchSummary.map(item => `<p>${item.interval} 天前（${item.batchDate}）批次：<strong>${item.count}</strong> 个</p>`).join('') || '<p class="muted">暂无批次</p>';
+  document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
 }
+
 
 function renderReview() {
   ensureNormalReviewSession();
@@ -452,8 +460,6 @@ function renderReview() {
   const echoRow = document.getElementById('reviewInputEchoRow');
   const attemptResult = document.getElementById('attemptResult');
   const autoJudge = document.getElementById('reviewAutoJudge');
-  const wrongBtn = document.getElementById('submitWrongBtn');
-  const normalBtn = document.getElementById('submitNormalBtn');
 
   modeText.textContent = session.phase === 1 ? '第一轮：先看英文，心里回忆中文意思' : '第二轮：先看中文，输入英文拼写';
   prompt.textContent = session.phase === 1 ? item.word : item.meaning;
@@ -470,28 +476,78 @@ function renderReview() {
   attemptResult.textContent = session.inputValue || '未输入';
   autoJudge.textContent = '';
   autoJudge.className = 'judge-text';
+  let check = null;
   if (session.phase === 2) {
-    const check = getEnglishCheckResult(session.inputValue, item.word);
+    check = getEnglishCheckResult(session.inputValue, item.word);
     autoJudge.textContent = check.text;
     autoJudge.classList.add(check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : '');
   }
-  wrongBtn.textContent = getWrongBookIds().has(item.id) ? '已在错词本，错误次数+1后下一个' : '加入错词本并下一个';
 
-  document.querySelectorAll('#rateButtons button').forEach(btn => {
-    btn.classList.toggle('selected-rate', btn.dataset.rating === session.selectedRating);
-  });
-  normalBtn.disabled = !session.selectedRating;
-  wrongBtn.disabled = !session.selectedRating;
+  const applyAgain = async () => {
+    await finishNormalReviewStep('Again', true);
+    await saveState();
+    resetWrongBookSession();
+    renderAll();
+  };
+  const applyPositive = async (rating) => {
+    await finishNormalReviewStep(rating, false);
+    await saveState();
+    renderAll();
+  };
+
+  if (!session.showAnswer) {
+    document.getElementById('showAnswerBtn').onclick = () => {
+      session.showAnswer = true;
+      session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
+      session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
+      renderReview();
+    };
+    return;
+  }
+
+  if (session.phase === 1) {
+    ratingWrap.innerHTML = `
+      <div class="small muted">选择标签后会自动记录并进入下一题；Again 会自动加入错词本。</div>
+      <div class="button-row wrap">
+        <button class="btn easy" data-action="easy">Easy</button>
+        <button class="btn good" data-action="good">Good</button>
+        <button class="btn hard" data-action="hard">Hard</button>
+        <button class="btn again" data-action="again">Again（自动加错词本）</button>
+      </div>
+    `;
+    ratingWrap.querySelector('[data-action="easy"]').onclick = () => applyPositive('Easy');
+    ratingWrap.querySelector('[data-action="good"]').onclick = () => applyPositive('Good');
+    ratingWrap.querySelector('[data-action="hard"]').onclick = () => applyPositive('Hard');
+    ratingWrap.querySelector('[data-action="again"]').onclick = () => applyAgain();
+  } else if (session.autoAgainReady) {
+    ratingWrap.innerHTML = `
+      <div class="small" style="color:#be123c">已自动判定为 Again，并会自动加入错词本。</div>
+      <div class="button-row wrap"><button class="btn again" data-action="autoAgain">已判 Again，下一题</button></div>
+    `;
+    ratingWrap.querySelector('[data-action="autoAgain"]').onclick = () => applyAgain();
+  } else {
+    ratingWrap.innerHTML = `
+      <div class="small muted">输入正确后，选择一个正确标签，会自动记录并进入下一题。</div>
+      <div class="button-row wrap">
+        <button class="btn easy" data-action="easy">Easy</button>
+        <button class="btn good" data-action="good">Good</button>
+        <button class="btn hard" data-action="hard">Hard</button>
+      </div>
+    `;
+    ratingWrap.querySelector('[data-action="easy"]').onclick = () => applyPositive('Easy');
+    ratingWrap.querySelector('[data-action="good"]').onclick = () => applyPositive('Good');
+    ratingWrap.querySelector('[data-action="hard"]').onclick = () => applyPositive('Hard');
+  }
 }
 
-function finishNormalReviewStep(addToWrongBook) {
+async function finishNormalReviewStep(rating, addToWrongBook) {
   const session = reviewSession;
   const { batches, batch, item } = getSessionBatch(session);
-  if (!item || !session.selectedRating) return;
+  if (!item || !rating) return;
   const key = item.id;
   const prev = session.roundRatings[key] || {};
-  if (session.phase === 1) prev.phase1 = session.selectedRating;
-  if (session.phase === 2) prev.phase2 = session.selectedRating;
+  if (session.phase === 1) prev.phase1 = rating;
+  if (session.phase === 2) prev.phase2 = rating;
   session.roundRatings[key] = prev;
 
   state.logs.unshift({
@@ -500,7 +556,7 @@ function finishNormalReviewStep(addToWrongBook) {
     word: item.word,
     source: reviewContext.type === 'batch' ? '日历批次复习' : '普通复习',
     pass: session.phase === 1 ? '英→中' : '中→英',
-    rating: session.selectedRating,
+    rating,
     addedToWrongBook: addToWrongBook,
     inputValue: session.inputValue,
   });
@@ -527,7 +583,7 @@ function finishNormalReviewStep(addToWrongBook) {
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
   const isLastBatch = session.batchIndex >= batches.length - 1;
   session.showAnswer = false;
-  session.selectedRating = '';
+  session.autoAgainReady = false;
   session.inputValue = '';
 
   if (!isLastWordInBatch) {
@@ -583,6 +639,7 @@ function renderWrongBook() {
   }
 
   const check = session.phase === 2 ? getEnglishCheckResult(session.inputValue, item.word) : null;
+  const errorCount = Number(item.errorCount ?? 1) || 1;
   box.innerHTML = `
     <div class="summary-pill">批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
     <p class="muted">${session.phase === 1 ? '第一轮：英文 → 中文' : '第二轮：中文 → 英文'}</p>
@@ -592,17 +649,11 @@ function renderWrongBook() {
       <div class="answer-box">
         <p><strong>答案：</strong>${escapeHtml(item.word)}</p>
         <p><strong>释义：</strong>${escapeHtml(item.meaning)}</p>
-        <p><strong>当前错词次数：</strong>${item.errorCount}</p>
+        <p><strong>当前错词次数：</strong>${errorCount}</p>
         ${session.phase === 2 ? `<p><strong>你的拼写：</strong>${escapeHtml(session.inputValue || '未输入')}</p><p class="judge-text ${check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : ''}">${escapeHtml(check.text)}</p>` : ''}
       </div>
       <div class="small muted">Easy / Good / Hard 视为答对，错误次数 -1；Again 视为答错，错误次数 +1。</div>
-      <div class="button-row wrap" id="wrongbookRateButtons">
-        <button class="btn easy ${session.selectedRating === 'Easy' ? 'selected-rate' : ''}" data-rating="Easy">Easy</button>
-        <button class="btn good ${session.selectedRating === 'Good' ? 'selected-rate' : ''}" data-rating="Good">Good</button>
-        <button class="btn hard ${session.selectedRating === 'Hard' ? 'selected-rate' : ''}" data-rating="Hard">Hard</button>
-        <button class="btn again ${session.selectedRating === 'Again' ? 'selected-rate' : ''}" data-rating="Again">Again</button>
-      </div>
-      <div class="button-row"><button class="btn dark-action" id="wrongbookSubmitBtn" ${session.selectedRating ? '' : 'disabled'}>提交并下一个</button></div>
+      <div id="wrongbookActions"></div>
     `}
   `;
 
@@ -611,27 +662,61 @@ function renderWrongBook() {
       session.inputValue = e.target.value;
     };
   }
+
   if (!session.showAnswer) {
     document.getElementById('wrongbookShowAnswerBtn').onclick = () => {
       session.showAnswer = true;
+      session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
       renderWrongBook();
     };
+    return;
+  }
+
+  const actions = document.getElementById('wrongbookActions');
+  const submit = async (delta, rating) => {
+    await finishWrongBookReviewStep(delta, rating);
+    await saveState();
+    renderAll();
+  };
+
+  if (session.phase === 1) {
+    actions.innerHTML = `
+      <div class="button-row wrap">
+        <button class="btn easy" data-action="easy">Easy</button>
+        <button class="btn good" data-action="good">Good</button>
+        <button class="btn hard" data-action="hard">Hard</button>
+        <button class="btn again" data-action="again">Again</button>
+      </div>
+    `;
+    actions.querySelector('[data-action="easy"]').onclick = () => submit(-1, 'Easy');
+    actions.querySelector('[data-action="good"]').onclick = () => submit(-1, 'Good');
+    actions.querySelector('[data-action="hard"]').onclick = () => submit(-1, 'Hard');
+    actions.querySelector('[data-action="again"]').onclick = () => submit(1, 'Again');
+  } else if (session.autoAgainReady) {
+    actions.innerHTML = `
+      <div class="small" style="color:#be123c">已自动判定为 Again。</div>
+      <div class="button-row wrap"><button class="btn again" data-action="autoAgain">已判 Again，下一题</button></div>
+    `;
+    actions.querySelector('[data-action="autoAgain"]').onclick = () => submit(1, 'Again');
   } else {
-    document.querySelectorAll('#wrongbookRateButtons button').forEach(btn => {
-      btn.onclick = () => {
-        session.selectedRating = btn.dataset.rating;
-        renderWrongBook();
-      };
-    });
-    document.getElementById('wrongbookSubmitBtn').onclick = () => finishWrongBookReviewStep();
+    actions.innerHTML = `
+      <div class="small muted">输入正确后，选择一个正确标签，会自动记录并进入下一题。</div>
+      <div class="button-row wrap">
+        <button class="btn easy" data-action="easy">Easy</button>
+        <button class="btn good" data-action="good">Good</button>
+        <button class="btn hard" data-action="hard">Hard</button>
+      </div>
+    `;
+    actions.querySelector('[data-action="easy"]').onclick = () => submit(-1, 'Easy');
+    actions.querySelector('[data-action="good"]').onclick = () => submit(-1, 'Good');
+    actions.querySelector('[data-action="hard"]').onclick = () => submit(-1, 'Hard');
   }
 }
 
-function finishWrongBookReviewStep() {
+async function finishWrongBookReviewStep(delta, rating) {
   const session = wrongBookSession;
   const { batches, batch, item } = getSessionBatch(session);
-  if (!item || !session.selectedRating) return;
-  const delta = session.selectedRating === 'Again' ? 1 : -1;
+  if (!item || !rating) return;
   adjustWrongBookCount(item.id, delta);
   state.logs.unshift({
     id: uuid(),
@@ -639,14 +724,14 @@ function finishWrongBookReviewStep() {
     word: item.word,
     source: '错词本复习',
     pass: session.phase === 1 ? '英→中' : '中→英',
-    rating: session.selectedRating,
+    rating,
     addedToWrongBook: false,
     inputValue: session.inputValue,
   });
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
   const isLastBatch = session.batchIndex >= batches.length - 1;
   session.showAnswer = false;
-  session.selectedRating = '';
+  session.autoAgainReady = false;
   session.inputValue = '';
   if (!isLastWordInBatch) {
     session.wordIndex += 1;
@@ -721,8 +806,10 @@ function renderSelectedDateWords() {
   attachWordCardEvents(container);
 }
 
-function renderWordCardHtml(word, extraHtml = '') {
-  const wrongCount = getWrongBookMap().get(word.id);
+function renderWordCardHtml(word, extraHtml = '', options = {}) {
+  const wrongCount = getWrongBookMap().get(word.id) ?? word.errorCount;
+  const editable = options.editable !== false;
+  const deletable = options.deletable !== false;
   return `
     <div class="list-item" data-word-id="${word.id}">
       <div class="word-head">
@@ -735,13 +822,11 @@ function renderWordCardHtml(word, extraHtml = '') {
       <div style="margin-top:8px;">${escapeHtml(word.example || '—')}</div>
       <div class="pills">${(word.tags || []).map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join('')}</div>
       <div class="small muted" style="margin-top:8px;">录入：${word.createdAt}${wrongCount ? ` · 错词次数：${wrongCount}` : ''}${extraHtml}</div>
-      <div class="word-actions">
-        <button class="btn" data-action="edit">编辑</button>
-        <button class="btn danger-outline" data-action="delete">删除</button>
-      </div>
+      ${(editable || deletable) ? `<div class="word-actions">${editable ? '<button class="btn" data-action="edit">编辑</button>' : ''}${deletable ? '<button class="btn danger-outline" data-action="delete">删除</button>' : ''}</div>` : ''}
     </div>
   `;
 }
+
 
 function attachWordCardEvents(container) {
   container.querySelectorAll('.list-item').forEach(card => {
@@ -784,9 +869,15 @@ function renderLibrary() {
 
 function renderWrongBookList(items = getWrongBookItems()) {
   const container = document.getElementById('wrongbookList');
-  container.innerHTML = items.length ? items.map(word => renderWordCardHtml(word)).join('') : '<div class="muted">错词本为空。</div>';
-  attachWordCardEvents(container);
+  const toggleBtn = document.getElementById('wrongbookListToggleBtn');
+  toggleBtn.textContent = showWrongList ? '收起错词列表' : '展开错词列表';
+  if (!showWrongList) {
+    container.innerHTML = '<div class="muted">错词列表已隐藏。你可以先完成上方错词复习，再按需要展开查看。</div>';
+    return;
+  }
+  container.innerHTML = items.length ? items.map(word => renderWordCardHtml(word, '', { editable: false, deletable: false })).join('') : '<div class="muted">错词本为空。</div>';
 }
+
 
 function renderLog() {
   const container = document.getElementById('logList');
@@ -1051,6 +1142,11 @@ function bindEvents() {
     renderLibrary();
   });
 
+  document.getElementById('wrongbookListToggleBtn').addEventListener('click', () => {
+    showWrongList = !showWrongList;
+    renderWrongBookList();
+  });
+
   document.getElementById('reviewSelectedBatchBtn').addEventListener('click', () => {
     reviewContext = { type: 'batch', sourceDate: selectedDate };
     resetNormalReviewSession();
@@ -1061,6 +1157,7 @@ function bindEvents() {
     ensureNormalReviewSession();
     reviewSession.showAnswer = true;
     reviewSession.inputValue = document.getElementById('reviewInputEnglish').value.trim();
+    reviewSession.autoAgainReady = reviewSession.phase === 2 && !getEnglishCheckResult(reviewSession.inputValue, getSessionBatch(reviewSession).item.word).isCorrect;
     renderReview();
   });
   document.getElementById('skipBtn').addEventListener('click', () => {
@@ -1070,8 +1167,8 @@ function bindEvents() {
     const isLastWordInBatch = session.wordIndex >= batch.length - 1;
     const isLastBatch = session.batchIndex >= batches.length - 1;
     session.showAnswer = false;
-    session.selectedRating = '';
     session.inputValue = '';
+    session.autoAgainReady = false;
     if (!isLastWordInBatch) session.wordIndex += 1;
     else if (session.phase === 1) { session.phase = 2; session.wordIndex = 0; }
     else if (!isLastBatch) { session.batchIndex += 1; session.phase = 1; session.wordIndex = 0; }
@@ -1081,26 +1178,6 @@ function bindEvents() {
   document.getElementById('reviewInputEnglish').addEventListener('input', (e) => {
     ensureNormalReviewSession();
     reviewSession.inputValue = e.target.value;
-  });
-  document.querySelectorAll('#rateButtons button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      ensureNormalReviewSession();
-      reviewSession.selectedRating = btn.dataset.rating;
-      renderReview();
-    });
-  });
-  document.getElementById('submitNormalBtn').addEventListener('click', async () => {
-    ensureNormalReviewSession();
-    finishNormalReviewStep(false);
-    await saveState();
-    renderAll();
-  });
-  document.getElementById('submitWrongBtn').addEventListener('click', async () => {
-    ensureNormalReviewSession();
-    finishNormalReviewStep(true);
-    await saveState();
-    resetWrongBookSession();
-    renderAll();
   });
 
   document.getElementById('calendarYearSelect').addEventListener('change', (e) => {
@@ -1231,7 +1308,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.1.1');
+      await navigator.serviceWorker.register('./sw.js?v=5.3');
     } catch {
       // ignore
     }

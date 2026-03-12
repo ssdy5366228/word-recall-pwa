@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.2" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.2" />
-  <link rel="stylesheet" href="./styles.css?v=5.2" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.3" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.3" />
+  <link rel="stylesheet" href="./styles.css?v=5.3" />
 </head>
 <body>
   <header class="app-header">
@@ -48,6 +48,7 @@
           <p>4. 错词本复习也按“每日新学词数”作为批次大小运行；正确一次减 1，错误一次加 1，到 0 自动移出。</p>
         </div>
       </article>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.3</div>
     </section>
 
     <section id="review" class="view">
@@ -79,19 +80,7 @@
             <p id="reviewAutoJudge" class="judge-text"></p>
           </div>
 
-          <div id="ratingWrap" class="hidden">
-            <div class="small muted">先选一个标签，再决定是否加入错词本</div>
-            <div class="button-row wrap" id="rateButtons">
-              <button class="btn easy" data-rating="Easy">Easy</button>
-              <button class="btn good" data-rating="Good">Good</button>
-              <button class="btn hard" data-rating="Hard">Hard</button>
-              <button class="btn again" data-rating="Again">Again</button>
-            </div>
-            <div class="button-row wrap">
-              <button class="btn dark-action" id="submitNormalBtn">记录并下一个</button>
-              <button class="btn danger-outline" id="submitWrongBtn">加入错词本并下一个</button>
-            </div>
-          </div>
+          <div id="ratingWrap" class="hidden"></div>
         </div>
       </article>
     </section>
@@ -185,8 +174,11 @@
       </article>
 
       <article class="card">
-        <div class="section-title">错词本</div>
-        <div class="small muted">同一个词只保留一条；重复加入时错误次数 +1；按错误次数从高到低排序。</div>
+        <div class="section-title">错词本列表</div>
+        <div class="button-row wrap no-top-margin">
+          <button class="btn" id="wrongbookListToggleBtn">展开错词列表</button>
+        </div>
+        <div class="small muted">为避免影响错词复习，列表默认折叠隐藏；需要时再展开查看。</div>
         <div id="wrongbookList" class="list-stack" style="margin-top: 12px;"></div>
       </article>
     </section>
@@ -284,6 +276,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.2" defer></script>
+  <script src="./app.js?v=5.3" defer></script>
 </body>
 </html>
