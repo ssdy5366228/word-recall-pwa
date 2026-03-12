@@ -129,6 +129,16 @@ function normalizeEnglish(text) {
     .replace(/\s+/g, ' ');
 }
 
+function canonicalWord(text) {
+  return String(text || '').trim().toLowerCase();
+}
+
+function findDuplicateWord(wordText, excludeId = null) {
+  const key = canonicalWord(wordText);
+  if (!key) return null;
+  return state.words.find(word => canonicalWord(word.word) === key && word.id !== excludeId) || null;
+}
+
 function getEnglishCheckResult(input, answer) {
   const normalizedInput = normalizeEnglish(input);
   const normalizedAnswer = normalizeEnglish(answer);
@@ -927,7 +937,13 @@ function closeEditModal() {
 async function saveEditModal() {
   const word = state.words.find(w => w.id === editingWordId);
   if (!word) return;
-  word.word = document.getElementById('editWordInput').value.trim();
+  const nextWord = document.getElementById('editWordInput').value.trim();
+  const duplicate = findDuplicateWord(nextWord, word.id);
+  if (duplicate) {
+    showToast(`该单词已在词库中，未保存重复词条（${duplicate.word}）`);
+    return;
+  }
+  word.word = nextWord;
   word.meaning = document.getElementById('editMeaningInput').value.trim();
   word.example = document.getElementById('editExampleInput').value.trim();
   word.tags = document.getElementById('editTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
@@ -953,11 +969,14 @@ function adjustWrongBookCount(wordId, delta) {
 }
 
 async function addWord(entry) {
+  const duplicate = findDuplicateWord(entry.word);
+  if (duplicate) return { ok: false, duplicate };
   state.words.push(normalizeWord({ id: uuid(), ...entry }));
   await saveState();
   resetNormalReviewSession();
   resetWrongBookSession();
   renderAll();
+  return { ok: true };
 }
 
 async function handleAddTodayWord() {
@@ -966,7 +985,8 @@ async function handleAddTodayWord() {
   const example = document.getElementById('exampleInput').value.trim();
   const tags = document.getElementById('tagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
-  await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
+  const result = await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
+  if (!result?.ok) return showToast(`该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('wordInput').value = '';
   document.getElementById('meaningInput').value = '';
   document.getElementById('exampleInput').value = '';
@@ -980,7 +1000,8 @@ async function handleAddWordToSelectedDate() {
   const example = document.getElementById('calendarExampleInput').value.trim();
   const tags = document.getElementById('calendarTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
-  await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
+  const result = await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
+  if (!result?.ok) return showToast(`该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('calendarWordInput').value = '';
   document.getElementById('calendarMeaningInput').value = '';
   document.getElementById('calendarExampleInput').value = '';
@@ -1002,14 +1023,21 @@ function bindEvents() {
       ['hesitate', '犹豫', 'Don’t hesitate to ask questions.', ['口语']],
       ['accurate', '准确的', 'Your pronunciation is quite accurate.', ['口语']],
     ];
+    let added = 0;
+    let skipped = 0;
     for (const [word, meaning, example, tags] of demo) {
+      if (findDuplicateWord(word)) {
+        skipped += 1;
+        continue;
+      }
       state.words.push(normalizeWord({ id: uuid(), word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 }));
+      added += 1;
     }
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
     renderAll();
-    showToast('已导入 5 个示例');
+    showToast(skipped ? `已导入 ${added} 个示例，跳过 ${skipped} 个重复单词` : `已导入 ${added} 个示例`);
   });
   document.getElementById('addWordToSelectedDateBtn').addEventListener('click', handleAddWordToSelectedDate);
 
