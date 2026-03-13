@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.3" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.3" />
-  <link rel="stylesheet" href="./styles.css?v=5.3" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.3.1" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.3.1" />
+  <link rel="stylesheet" href="./styles.css?v=5.3.1" />
 </head>
 <body>
   <header class="app-header">
@@ -35,7 +35,7 @@
       </article>
 
       <article class="card">
-        <div class="section-title">今天待复习批次</div>
+        <div class="section-title">今日待复习日期批次</div>
         <div id="batchSummary"></div>
       </article>
 
@@ -48,7 +48,7 @@
           <p>4. 错词本复习也按“每日新学词数”作为批次大小运行；正确一次减 1，错误一次加 1，到 0 自动移出。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.3</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.3.1</div>
     </section>
 
     <section id="review" class="view">
@@ -173,7 +173,7 @@
         <div id="wrongbookReviewBox"></div>
       </article>
 
-      <article class="card">
+      <article class="card" id="wrongbookListCard">
         <div class="section-title">错词本列表</div>
         <div class="button-row wrap no-top-margin">
           <button class="btn" id="wrongbookListToggleBtn">展开错词列表</button>
@@ -276,6 +276,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.3" defer></script>
+  <script src="./app.js?v=5.3.1" defer></script>
 </body>
 </html>

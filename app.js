@@ -2,7 +2,7 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const APP_VERSION = 'v5.3';
+const APP_VERSION = 'v5.3.1';
 
 const defaultState = {
   settings: {
@@ -445,7 +445,7 @@ function renderReview() {
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
 
   const modeText = document.getElementById('reviewModeText');
   const prompt = document.getElementById('reviewPrompt');
@@ -481,6 +481,7 @@ function renderReview() {
     check = getEnglishCheckResult(session.inputValue, item.word);
     autoJudge.textContent = check.text;
     autoJudge.classList.add(check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : '');
+    if (session.showAnswer) session.autoAgainReady = !check.isCorrect;
   }
 
   const applyAgain = async () => {
@@ -639,9 +640,10 @@ function renderWrongBook() {
   }
 
   const check = session.phase === 2 ? getEnglishCheckResult(session.inputValue, item.word) : null;
+  if (session.phase === 2 && session.showAnswer) session.autoAgainReady = !check.isCorrect;
   const errorCount = Number(item.errorCount ?? 1) || 1;
   box.innerHTML = `
-    <div class="summary-pill">批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
+    <div class="summary-pill">复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
     <p class="muted">${session.phase === 1 ? '第一轮：英文 → 中文' : '第二轮：中文 → 英文'}</p>
     <div class="prompt">${escapeHtml(session.phase === 1 ? item.word : item.meaning)}</div>
     ${session.phase === 2 ? `<label for="wrongbookInputEnglish">输入你回忆出的英文</label><input id="wrongbookInputEnglish" value="${escapeHtml(session.inputValue)}" autocapitalize="off" autocomplete="off" spellcheck="false" />` : ''}
@@ -660,6 +662,7 @@ function renderWrongBook() {
   if (session.phase === 2) {
     document.getElementById('wrongbookInputEnglish').oninput = (e) => {
       session.inputValue = e.target.value;
+      if (session.showAnswer) renderWrongBook();
     };
   }
 
@@ -868,14 +871,20 @@ function renderLibrary() {
 }
 
 function renderWrongBookList(items = getWrongBookItems()) {
+  const card = document.getElementById('wrongbookListCard');
   const container = document.getElementById('wrongbookList');
   const toggleBtn = document.getElementById('wrongbookListToggleBtn');
+  if (!items.length) {
+    if (card) card.classList.add('hidden');
+    return;
+  }
+  if (card) card.classList.remove('hidden');
   toggleBtn.textContent = showWrongList ? '收起错词列表' : '展开错词列表';
   if (!showWrongList) {
     container.innerHTML = '<div class="muted">错词列表已隐藏。你可以先完成上方错词复习，再按需要展开查看。</div>';
     return;
   }
-  container.innerHTML = items.length ? items.map(word => renderWordCardHtml(word, '', { editable: false, deletable: false })).join('') : '<div class="muted">错词本为空。</div>';
+  container.innerHTML = items.map(word => renderWordCardHtml(word, '', { editable: false, deletable: false })).join('');
 }
 
 
@@ -1178,6 +1187,7 @@ function bindEvents() {
   document.getElementById('reviewInputEnglish').addEventListener('input', (e) => {
     ensureNormalReviewSession();
     reviewSession.inputValue = e.target.value;
+    if (reviewSession.showAnswer) renderReview();
   });
 
   document.getElementById('calendarYearSelect').addEventListener('change', (e) => {
@@ -1308,7 +1318,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.3');
+      await navigator.serviceWorker.register('./sw.js?v=5.3.1');
     } catch {
       // ignore
     }

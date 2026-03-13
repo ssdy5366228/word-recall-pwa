@@ -6,3 +6,5 @@ This package uses cache-busting fixes for 5.1.1.
 
 
 v5.3 adds duplicate-entry prevention across the whole library.
+
+v5.3.1 fixes the auto-Again mismatch in CN→EN review, clarifies batch wording, and hides the wrong-word list card when empty.
