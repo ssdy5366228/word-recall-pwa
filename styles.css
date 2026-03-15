@@ -158,6 +158,15 @@ textarea { min-height: 96px; resize: vertical; }
   margin-right: 6px;
   margin-bottom: 6px;
 }
+
+.swipe-card { position: relative; overflow: hidden; border-radius: 14px; }
+.swipe-actions { position: absolute; right: 0; top: 0; bottom: 0; display: flex; z-index: 0; }
+.swipe-btn { width: 72px; border: 0; color: #fff; font-size: 13px; }
+.swipe-edit { background: #2563eb; }
+.swipe-delete { background: #dc2626; }
+.swipe-content { position: relative; z-index: 1; transition: transform 0.18s ease; border-radius: 14px; }
+.swipe-card.swiped .swipe-content { transform: translateX(-144px); }
+
 .inline-form {
   margin-top: 14px;
   padding: 12px;

@@ -2,7 +2,7 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const APP_VERSION = 'v5.3.1';
+const APP_VERSION = 'v5.4';
 
 const defaultState = {
   settings: {
@@ -29,6 +29,7 @@ let pendingImportState = null;
 let pendingImportPreview = null;
 let librarySearch = '';
 let showWrongList = false;
+let activeSwipeCard = null;
 
 function showToast(message) {
   const el = document.getElementById('toast');
@@ -313,6 +314,7 @@ function getReviewContextKey() {
 
 function startNormalReviewSession() {
   const queue = buildNormalQueue();
+  const baseBatches = chunk(queue.map(w => w.id), getBatchSize());
   reviewSession = {
     type: 'normal',
     contextKey: getReviewContextKey(),
@@ -328,6 +330,8 @@ function startNormalReviewSession() {
     roundRatings: {},
     batchOrders: {},
     autoAgainReady: false,
+    currentPoolIds: baseBatches[0] || [],
+    remedialRound: 0,
   };
 }
 
@@ -372,18 +376,30 @@ function ensureWrongBookSession() {
 }
 
 function getSessionBatch(session) {
-  const queue = session.type === 'wrongbook'
-    ? session.queueIds.map(id => getWrongBookItems().find(word => word.id === id)).filter(Boolean)
-    : session.queueIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
-  const batches = chunk(queue, session.batchSize);
-  const baseBatch = batches[session.batchIndex] || [];
-  const orderKey = `${session.phase}_${session.batchIndex}`;
+  if (session.type === 'wrongbook') {
+    const queue = session.queueIds.map(id => getWrongBookItems().find(word => word.id === id)).filter(Boolean);
+    const batches = chunk(queue, session.batchSize);
+    const baseBatch = batches[session.batchIndex] || [];
+    const orderKey = `${session.phase}_${session.batchIndex}`;
+    session.batchOrders = session.batchOrders || {};
+    if (!session.batchOrders[orderKey]) {
+      session.batchOrders[orderKey] = shuffleArray(baseBatch.map(word => word.id));
+    }
+    const batch = session.batchOrders[orderKey].map(id => baseBatch.find(word => word.id === id)).filter(Boolean);
+    return { queue, batches, batch, item: batch[session.wordIndex] || null };
+  }
+
+  const queue = session.queueIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
+  const baseBatches = chunk(queue.map(word => word.id), session.batchSize);
+  if (!Array.isArray(session.currentPoolIds)) session.currentPoolIds = baseBatches[session.batchIndex] || [];
+  const poolWords = session.currentPoolIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
+  const orderKey = `${session.batchIndex}_${session.phase}_${session.remedialRound || 0}_${session.currentPoolIds.join('|')}`;
   session.batchOrders = session.batchOrders || {};
   if (!session.batchOrders[orderKey]) {
-    session.batchOrders[orderKey] = shuffleArray(baseBatch.map(word => word.id));
+    session.batchOrders[orderKey] = shuffleArray(poolWords.map(word => word.id));
   }
-  const batch = session.batchOrders[orderKey].map(id => baseBatch.find(word => word.id === id)).filter(Boolean);
-  return { queue, batches, batch, item: batch[session.wordIndex] || null };
+  const batch = session.batchOrders[orderKey].map(id => poolWords.find(word => word.id === id)).filter(Boolean);
+  return { queue, batches: baseBatches, batch, item: batch[session.wordIndex] || null, baseBatches };
 }
 
 function renderDashboard() {
@@ -445,7 +461,7 @@ function renderReview() {
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `${session.remedialRound ? `补救复习第 ${session.remedialRound} 轮 · ` : ''}复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
 
   const modeText = document.getElementById('reviewModeText');
   const prompt = document.getElementById('reviewPrompt');
@@ -543,7 +559,7 @@ function renderReview() {
 
 async function finishNormalReviewStep(rating, addToWrongBook) {
   const session = reviewSession;
-  const { batches, batch, item } = getSessionBatch(session);
+  const { batches, batch, item, baseBatches } = getSessionBatch(session);
   if (!item || !rating) return;
   const key = item.id;
   const prev = session.roundRatings[key] || {};
@@ -562,40 +578,61 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     inputValue: session.inputValue,
   });
 
-  if (addToWrongBook) {
-    adjustWrongBookCount(item.id, 1);
-  }
-
-  if (session.phase === 2) {
-    const finalRating = worseRating(prev.phase1, prev.phase2);
-    const word = state.words.find(w => w.id === item.id);
-    if (word) {
-      word.lastReviewDate = todayStr();
-      word.lastFinalRating = finalRating;
-      const shouldMark = reviewContext.type === 'today' || (reviewContext.type === 'batch' && getBatchDatesForTargetDate(todayStr(), state.settings.intervals).includes(reviewContext.sourceDate));
-      if (shouldMark) {
-        const reviewedOn = new Set(word.reviewedOnDates || []);
-        reviewedOn.add(todayStr());
-        word.reviewedOnDates = [...reviewedOn];
-      }
-    }
-  }
+  if (addToWrongBook) adjustWrongBookCount(item.id, 1);
 
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
-  const isLastBatch = session.batchIndex >= batches.length - 1;
   session.showAnswer = false;
   session.autoAgainReady = false;
   session.inputValue = '';
 
   if (!isLastWordInBatch) {
     session.wordIndex += 1;
-  } else if (session.phase === 1) {
+    return;
+  }
+
+  if (session.phase === 1) {
     session.phase = 2;
     session.wordIndex = 0;
-  } else if (!isLastBatch) {
-    session.batchIndex += 1;
+    return;
+  }
+
+  const shouldMark = reviewContext.type === 'today' || (reviewContext.type === 'batch' && getBatchDatesForTargetDate(todayStr(), state.settings.intervals).includes(reviewContext.sourceDate));
+  const failedIds = [];
+
+  (session.currentPoolIds || []).forEach((id) => {
+    const result = session.roundRatings[id] || {};
+    const word = state.words.find((w) => w.id === id);
+    if (!word) return;
+    const hadAgain = result.phase1 === 'Again' || result.phase2 === 'Again';
+    const finalRating = worseRating(result.phase1, result.phase2);
+    word.lastReviewDate = todayStr();
+    word.lastFinalRating = finalRating || word.lastFinalRating;
+    if (hadAgain) {
+      failedIds.push(id);
+    } else if (shouldMark) {
+      const reviewedOn = new Set(word.reviewedOnDates || []);
+      reviewedOn.add(todayStr());
+      word.reviewedOnDates = [...reviewedOn];
+    }
+  });
+
+  session.batchOrders = {};
+  session.roundRatings = {};
+  session.wordIndex = 0;
+
+  if (failedIds.length) {
+    session.currentPoolIds = failedIds;
+    session.remedialRound = (session.remedialRound || 0) + 1;
     session.phase = 1;
-    session.wordIndex = 0;
+    return;
+  }
+
+  const isLastBatch = session.batchIndex >= baseBatches.length - 1;
+  if (!isLastBatch) {
+    session.batchIndex += 1;
+    session.currentPoolIds = baseBatches[session.batchIndex] || [];
+    session.remedialRound = 0;
+    session.phase = 1;
   } else {
     session.completed = true;
   }
@@ -646,7 +683,7 @@ function renderWrongBook() {
     <div class="summary-pill">复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
     <p class="muted">${session.phase === 1 ? '第一轮：英文 → 中文' : '第二轮：中文 → 英文'}</p>
     <div class="prompt">${escapeHtml(session.phase === 1 ? item.word : item.meaning)}</div>
-    ${session.phase === 2 ? `<label for="wrongbookInputEnglish">输入你回忆出的英文</label><input id="wrongbookInputEnglish" value="${escapeHtml(session.inputValue)}" autocapitalize="off" autocomplete="off" spellcheck="false" />` : ''}
+    ${session.phase === 2 ? `<label for="wrongbookInputEnglish">输入你回忆出的英文</label><input id="wrongbookInputEnglish" value="${escapeHtml(session.inputValue)}" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done" data-gramm="false" />` : ''}
     ${!session.showAnswer ? `<div class="button-row"><button class="btn primary" id="wrongbookShowAnswerBtn">显示答案</button></div>` : `
       <div class="answer-box">
         <p><strong>答案：</strong>${escapeHtml(item.word)}</p>
@@ -805,7 +842,7 @@ function renderSelectedDateWords() {
     container.innerHTML = '<div class="list-item muted">这一天当前没有录入单词，但你现在可以直接补录到这一天。</div>';
     return;
   }
-  container.innerHTML = words.map(renderWordCardHtml).join('');
+  container.innerHTML = words.map(word => renderWordCardHtml(word, '', { swipeable: true })).join('');
   attachWordCardEvents(container);
 }
 
@@ -813,8 +850,8 @@ function renderWordCardHtml(word, extraHtml = '', options = {}) {
   const wrongCount = getWrongBookMap().get(word.id) ?? word.errorCount;
   const editable = options.editable !== false;
   const deletable = options.deletable !== false;
-  return `
-    <div class="list-item" data-word-id="${word.id}">
+  const swipeable = Boolean(options.swipeable && (editable || deletable));
+  const bodyHtml = `
       <div class="word-head">
         <div>
           <strong>${escapeHtml(word.word)}</strong>
@@ -825,21 +862,82 @@ function renderWordCardHtml(word, extraHtml = '', options = {}) {
       <div style="margin-top:8px;">${escapeHtml(word.example || '—')}</div>
       <div class="pills">${(word.tags || []).map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join('')}</div>
       <div class="small muted" style="margin-top:8px;">录入：${word.createdAt}${wrongCount ? ` · 错词次数：${wrongCount}` : ''}${extraHtml}</div>
-      ${(editable || deletable) ? `<div class="word-actions">${editable ? '<button class="btn" data-action="edit">编辑</button>' : ''}${deletable ? '<button class="btn danger-outline" data-action="delete">删除</button>' : ''}</div>` : ''}
-    </div>
-  `;
+      ${(!swipeable && (editable || deletable)) ? `<div class="word-actions">${editable ? '<button class="btn" data-action="edit">编辑</button>' : ''}${deletable ? '<button class="btn danger-outline" data-action="delete">删除</button>' : ''}</div>` : ''}
+    `;
+
+  if (swipeable) {
+    return `
+      <div class="swipe-card" data-word-id="${word.id}">
+        <div class="swipe-actions">
+          ${editable ? '<button class="swipe-btn swipe-edit" data-action="edit">编辑</button>' : ''}
+          ${deletable ? '<button class="swipe-btn swipe-delete" data-action="delete">删除</button>' : ''}
+        </div>
+        <div class="list-item swipe-content">${bodyHtml}</div>
+      </div>
+    `;
+  }
+
+  return `<div class="list-item" data-word-id="${word.id}">${bodyHtml}</div>`;
 }
 
+function attachSwipeWordCards(container) {
+  const cards = container.querySelectorAll('.swipe-card');
+  cards.forEach((card) => {
+    const content = card.querySelector('.swipe-content');
+    if (!content) return;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+
+    const closeOther = () => {
+      if (activeSwipeCard && activeSwipeCard !== card) activeSwipeCard.classList.remove('swiped');
+    };
+
+    content.addEventListener('touchstart', (e) => {
+      const touch = e.touches[0];
+      startX = touch.clientX;
+      startY = touch.clientY;
+      dragging = true;
+      closeOther();
+    }, { passive: true });
+
+    content.addEventListener('touchend', (e) => {
+      if (!dragging) return;
+      dragging = false;
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - startX;
+      const dy = touch.clientY - startY;
+      if (Math.abs(dy) > Math.abs(dx)) return;
+      if (dx < -36) {
+        card.classList.add('swiped');
+        activeSwipeCard = card;
+      } else if (dx > 24) {
+        card.classList.remove('swiped');
+        if (activeSwipeCard === card) activeSwipeCard = null;
+      }
+    }, { passive: true });
+
+    content.addEventListener('click', (e) => {
+      if (card.classList.contains('swiped')) {
+        e.preventDefault();
+        e.stopPropagation();
+        card.classList.remove('swiped');
+        if (activeSwipeCard === card) activeSwipeCard = null;
+      }
+    });
+  });
+}
 
 function attachWordCardEvents(container) {
-  container.querySelectorAll('.list-item').forEach(card => {
+  container.querySelectorAll('[data-word-id]').forEach(card => {
     const id = card.dataset.wordId;
     const word = state.words.find(w => w.id === id);
     if (!word) return;
     const editBtn = card.querySelector('[data-action="edit"]');
     const deleteBtn = card.querySelector('[data-action="delete"]');
-    if (editBtn) editBtn.onclick = () => openEditModal(word.id);
-    if (deleteBtn) deleteBtn.onclick = async () => {
+    if (editBtn) editBtn.onclick = (e) => { e.stopPropagation(); activeSwipeCard = null; openEditModal(word.id); };
+    if (deleteBtn) deleteBtn.onclick = async (e) => {
+      e.stopPropagation();
       if (!confirm('确定删除这个单词吗？')) return;
       state.words = state.words.filter(w => w.id !== id);
       state.wrongBook = state.wrongBook.filter(item => item.wordId !== id);
@@ -849,6 +947,7 @@ function attachWordCardEvents(container) {
       renderAll();
     };
   });
+  attachSwipeWordCards(container);
 }
 
 function renderLibrary() {
@@ -866,7 +965,7 @@ function renderLibrary() {
     countEl.textContent = '';
     countEl.classList.add('hidden');
   }
-  container.innerHTML = words.length ? words.map(renderWordCardHtml).join('') : '<div class="muted">未找到匹配词条。</div>';
+  container.innerHTML = words.length ? words.map(word => renderWordCardHtml(word, '', { swipeable: true })).join('') : '<div class="muted">未找到匹配词条。</div>';
   attachWordCardEvents(container);
 }
 

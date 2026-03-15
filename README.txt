@@ -1,10 +1,7 @@
-将本文件夹内所有文件上传到仓库根目录，等待 GitHub Pages 更新后使用。
-建议更新前先在设置页导出 JSON 备份。
+Word Recall v5.4
 
-
-This package uses cache-busting fixes for 5.1.1.
-
-
-v5.3 adds duplicate-entry prevention across the whole library.
-
-v5.3.1 fixes the auto-Again mismatch in CN→EN review, clarifies batch wording, and hides the wrong-word list card when empty.
+- 复习 / 错词复习输入框增加 autocorrect 关闭等限制（录入界面保持不变）
+- 词库列表支持左划显示编辑 / 删除
+- 日历当天录入列表支持左划显示编辑 / 删除
+- 普通复习新增批内 Again 词补救复习：两轮后继续练 Again 词，直到当前批次无 Again 再进入下一批
+- 缓存版本更新到 5.4

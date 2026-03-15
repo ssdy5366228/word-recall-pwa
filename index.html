@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.3.1" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.3.1" />
-  <link rel="stylesheet" href="./styles.css?v=5.3.1" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.4" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.4" />
+  <link rel="stylesheet" href="./styles.css?v=5.4" />
 </head>
 <body>
   <header class="app-header">
@@ -44,11 +44,11 @@
         <div class="notes" id="usageNotes">
           <p>1. 先录入单词，再进入“复习”。</p>
           <p>2. 普通复习按“每日新学词数”作为每批复习词数运行，先做英文→中文，再做中文→英文。</p>
-          <p>3. 每一批都会随机排序，第二轮重新随机；再决定是“记录并下一个”还是“加入错词本并下一个”。</p>
+          <p>3. 每一批都会随机排序，第二轮重新随机；本批出现 Again 的词会在两轮后继续补救复习。</p>
           <p>4. 错词本复习也按“每日新学词数”作为批次大小运行；正确一次减 1，错误一次加 1，到 0 自动移出。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.3.1</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.4</div>
     </section>
 
     <section id="review" class="view">
@@ -64,7 +64,7 @@
 
           <div id="reviewInputWrap" class="hidden">
             <label for="reviewInputEnglish">输入你回忆出的英文</label>
-            <input id="reviewInputEnglish" placeholder="在这里输入英文" autocapitalize="off" autocomplete="off" spellcheck="false" />
+            <input id="reviewInputEnglish" placeholder="在这里输入英文" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done" data-gramm="false" />
           </div>
 
           <div class="button-row">
@@ -89,7 +89,7 @@
       <article class="card">
         <div class="section-title">录入单词</div>
         <label for="wordInput">英文单词</label>
-        <input id="wordInput" placeholder="例如 negotiate" autocapitalize="off" autocomplete="off" spellcheck="false" />
+        <input id="wordInput" placeholder="例如 negotiate" />
 
         <label for="meaningInput">中文释义</label>
         <input id="meaningInput" placeholder="例如 谈判；协商" />
@@ -114,7 +114,7 @@
         <div class="calendar-head">
           <div>
             <div class="section-title" id="calendarTitle">日历</div>
-            <div class="small muted">点某一天后，可查看当天录入单词、补录、编辑、删除，并从该日批次进入复习。</div>
+            <div class="small muted">点某一天后，可查看当天录入单词、补录，并通过左划词条显示编辑/删除，从该日批次进入复习。</div>
           </div>
           <div class="calendar-controls">
             <select id="calendarYearSelect"></select>
@@ -136,7 +136,7 @@
         <div class="inline-form" id="calendarAddForm">
           <div class="section-subtitle">向这一天新增单词</div>
           <label for="calendarWordInput">英文单词</label>
-          <input id="calendarWordInput" autocapitalize="off" autocomplete="off" spellcheck="false" />
+          <input id="calendarWordInput" />
           <label for="calendarMeaningInput">中文释义</label>
           <input id="calendarMeaningInput" />
           <label for="calendarExampleInput">例句（可选）</label>
@@ -155,7 +155,7 @@
     <section id="library" class="view">
       <article class="card">
         <div class="section-title">词库</div>
-        <div class="small muted">支持编辑和删除。阶段表示该单词在 0 / 1 / 3 / 7 / 14 / 30 这组间隔中的位置。</div>
+        <div class="small muted">左划词条可显示编辑和删除。阶段表示该单词在 0 / 1 / 3 / 7 / 14 / 30 这组间隔中的位置。</div>
         <div class="button-row wrap" style="margin-top:12px;">
           <input id="librarySearchInput" placeholder="搜索英文 / 中文 / 标签 / 例句" style="flex:1;min-width:220px;" />
           <button class="btn" id="librarySearchClearBtn">清空搜索</button>
@@ -255,7 +255,7 @@
     <div class="modal-panel">
       <div class="modal-title">编辑单词</div>
       <label for="editWordInput">英文单词</label>
-      <input id="editWordInput" autocapitalize="off" autocomplete="off" spellcheck="false" />
+      <input id="editWordInput" />
 
       <label for="editMeaningInput">中文释义</label>
       <input id="editMeaningInput" />
@@ -276,6 +276,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.3.1" defer></script>
+  <script src="./app.js?v=5.4" defer></script>
 </body>
 </html>
