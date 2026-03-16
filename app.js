@@ -2,7 +2,7 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const APP_VERSION = 'v5.4';
+const APP_VERSION = 'v5.4.2';
 
 const defaultState = {
   settings: {
@@ -289,8 +289,9 @@ async function loadState() {
   state = saved ? sanitizeImportedState(saved) : structuredClone(defaultState);
 }
 
-async function saveState() {
-  await dbSet(APP_STATE_KEY, state);
+async function saveState(nextState = state) {
+  await dbSet(APP_STATE_KEY, nextState);
+  state = nextState;
 }
 
 function resetNormalReviewSession() {
@@ -1142,12 +1143,21 @@ async function saveEditModal() {
     showToast(`该单词已在词库中，未保存重复词条（${duplicate.word}）`);
     return;
   }
-  word.word = nextWord;
-  word.meaning = document.getElementById('editMeaningInput').value.trim();
-  word.example = document.getElementById('editExampleInput').value.trim();
-  word.tags = document.getElementById('editTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
-  word.createdAt = document.getElementById('editCreatedAtInput').value || todayStr();
-  await saveState();
+  const nextState = structuredClone(state);
+  const target = nextState.words.find(w => w.id === editingWordId);
+  if (!target) return;
+  target.word = nextWord;
+  target.meaning = document.getElementById('editMeaningInput').value.trim();
+  target.example = document.getElementById('editExampleInput').value.trim();
+  target.tags = document.getElementById('editTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
+  target.createdAt = document.getElementById('editCreatedAtInput').value || todayStr();
+  try {
+    await saveState(nextState);
+  } catch (error) {
+    console.error(error);
+    showToast('保存失败，请重试');
+    return;
+  }
   closeEditModal();
   resetNormalReviewSession();
   resetWrongBookSession();
@@ -1170,8 +1180,14 @@ function adjustWrongBookCount(wordId, delta) {
 async function addWord(entry) {
   const duplicate = findDuplicateWord(entry.word);
   if (duplicate) return { ok: false, duplicate };
-  state.words.push(normalizeWord({ id: uuid(), ...entry }));
-  await saveState();
+  const nextState = structuredClone(state);
+  nextState.words.push(normalizeWord({ id: uuid(), ...entry }));
+  try {
+    await saveState(nextState);
+  } catch (error) {
+    console.error(error);
+    return { ok: false, saveFailed: true };
+  }
   resetNormalReviewSession();
   resetWrongBookSession();
   renderAll();
@@ -1185,7 +1201,7 @@ async function handleAddTodayWord() {
   const tags = document.getElementById('tagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
-  if (!result?.ok) return showToast(`该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('wordInput').value = '';
   document.getElementById('meaningInput').value = '';
   document.getElementById('exampleInput').value = '';
@@ -1200,7 +1216,7 @@ async function handleAddWordToSelectedDate() {
   const tags = document.getElementById('calendarTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
-  if (!result?.ok) return showToast(`该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('calendarWordInput').value = '';
   document.getElementById('calendarMeaningInput').value = '';
   document.getElementById('calendarExampleInput').value = '';
