@@ -2,7 +2,10 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const APP_VERSION = 'v5.4.2';
+const LS_STATE_KEY = 'word_recall_pwa_state_v5_5_beta';
+const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_5_beta';
+const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_5_beta';
+const APP_VERSION = 'v5.5-beta';
 
 const defaultState = {
   settings: {
@@ -70,6 +73,86 @@ function dbSet(key, value) {
     const req = tx.objectStore(STORE_APP).put(value, key);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
+  });
+}
+
+
+function localGetJSON(key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function localSetJSON(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function localRemove(key) {
+  localStorage.removeItem(key);
+}
+
+function getDraftKey(kind) {
+  return kind === 'calendar' ? LS_CALENDAR_DRAFT_KEY : LS_TODAY_DRAFT_KEY;
+}
+
+function getDraft(kind) {
+  return localGetJSON(getDraftKey(kind), { word: '', meaning: '', example: '', tags: '' }) || { word: '', meaning: '', example: '', tags: '' };
+}
+
+function saveDraft(kind, draft) {
+  localSetJSON(getDraftKey(kind), {
+    word: String(draft?.word || ''),
+    meaning: String(draft?.meaning || ''),
+    example: String(draft?.example || ''),
+    tags: String(draft?.tags || ''),
+  });
+}
+
+function clearDraft(kind) {
+  localRemove(getDraftKey(kind));
+}
+
+function applyDraftToInputs(kind) {
+  const draft = getDraft(kind);
+  if (kind === 'calendar') {
+    const wordEl = document.getElementById('calendarWordInput');
+    const meaningEl = document.getElementById('calendarMeaningInput');
+    const exampleEl = document.getElementById('calendarExampleInput');
+    const tagEl = document.getElementById('calendarTagInput');
+    if (wordEl) wordEl.value = draft.word || '';
+    if (meaningEl) meaningEl.value = draft.meaning || '';
+    if (exampleEl) exampleEl.value = draft.example || '';
+    if (tagEl) tagEl.value = draft.tags || '';
+    return;
+  }
+  const wordEl = document.getElementById('wordInput');
+  const meaningEl = document.getElementById('meaningInput');
+  const exampleEl = document.getElementById('exampleInput');
+  const tagEl = document.getElementById('tagInput');
+  if (wordEl) wordEl.value = draft.word || '';
+  if (meaningEl) meaningEl.value = draft.meaning || '';
+  if (exampleEl) exampleEl.value = draft.example || '';
+  if (tagEl) tagEl.value = draft.tags || '';
+}
+
+function captureDraftFromInputs(kind) {
+  if (kind === 'calendar') {
+    saveDraft('calendar', {
+      word: document.getElementById('calendarWordInput')?.value || '',
+      meaning: document.getElementById('calendarMeaningInput')?.value || '',
+      example: document.getElementById('calendarExampleInput')?.value || '',
+      tags: document.getElementById('calendarTagInput')?.value || '',
+    });
+    return;
+  }
+  saveDraft('today', {
+    word: document.getElementById('wordInput')?.value || '',
+    meaning: document.getElementById('meaningInput')?.value || '',
+    example: document.getElementById('exampleInput')?.value || '',
+    tags: document.getElementById('tagInput')?.value || '',
   });
 }
 
@@ -285,14 +368,34 @@ function escapeHtml(str) {
 }
 
 async function loadState() {
-  const saved = await dbGet(APP_STATE_KEY);
-  state = saved ? sanitizeImportedState(saved) : structuredClone(defaultState);
+  const saved = localGetJSON(LS_STATE_KEY, null);
+  if (saved) {
+    state = sanitizeImportedState(saved);
+    return;
+  }
+
+  try {
+    db = await openDB();
+    const legacy = await dbGet(APP_STATE_KEY);
+    if (legacy) {
+      state = sanitizeImportedState(legacy);
+      localSetJSON(LS_STATE_KEY, state);
+      return;
+    }
+  } catch (error) {
+    console.warn('Legacy IndexedDB migration skipped:', error);
+  }
+
+  state = structuredClone(defaultState);
+  localSetJSON(LS_STATE_KEY, state);
 }
 
 async function saveState(nextState = state) {
-  await dbSet(APP_STATE_KEY, nextState);
-  state = nextState;
+  const prepared = sanitizeImportedState(nextState);
+  localSetJSON(LS_STATE_KEY, prepared);
+  state = prepared;
 }
+
 
 function resetNormalReviewSession() {
   reviewSession = null;
@@ -1201,11 +1304,12 @@ async function handleAddTodayWord() {
   const tags = document.getElementById('tagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
-  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('wordInput').value = '';
   document.getElementById('meaningInput').value = '';
   document.getElementById('exampleInput').value = '';
   document.getElementById('tagInput').value = '';
+  clearDraft('today');
   showToast('已添加到今天');
 }
 
@@ -1216,11 +1320,12 @@ async function handleAddWordToSelectedDate() {
   const tags = document.getElementById('calendarTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
-  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('calendarWordInput').value = '';
   document.getElementById('calendarMeaningInput').value = '';
   document.getElementById('calendarExampleInput').value = '';
   document.getElementById('calendarTagInput').value = '';
+  clearDraft('calendar');
   showToast(`已添加到 ${selectedDate}`);
 }
 
@@ -1230,6 +1335,9 @@ function bindEvents() {
   });
 
   document.getElementById('addWordBtn').addEventListener('click', handleAddTodayWord);
+  ['wordInput', 'meaningInput', 'exampleInput', 'tagInput'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('today'));
+  });
   document.getElementById('addBatchDemoBtn').addEventListener('click', async () => {
     const demo = [
       ['negotiate', '谈判；协商', 'We need to negotiate a better price.', ['工作', '口语']],
@@ -1255,6 +1363,9 @@ function bindEvents() {
     showToast(skipped ? `已导入 ${added} 个示例，跳过 ${skipped} 个重复单词` : `已导入 ${added} 个示例`);
   });
   document.getElementById('addWordToSelectedDateBtn').addEventListener('click', handleAddWordToSelectedDate);
+  ['calendarWordInput', 'calendarMeaningInput', 'calendarExampleInput', 'calendarTagInput'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('calendar'));
+  });
 
   document.getElementById('librarySearchInput').addEventListener('input', (e) => {
     librarySearch = e.target.value || '';
@@ -1413,6 +1524,8 @@ function bindEvents() {
   document.getElementById('clearAllBtn').addEventListener('click', async () => {
     if (!confirm('确定清空所有本地数据吗？')) return;
     state = structuredClone(defaultState);
+    clearDraft('today');
+    clearDraft('calendar');
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
@@ -1433,7 +1546,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.3.1');
+      await navigator.serviceWorker.register('./sw.js?v=5.5-beta');
     } catch {
       // ignore
     }
@@ -1446,6 +1559,8 @@ async function registerSW() {
   selectedDate = todayStr();
   calendarCursor = new Date();
   bindEvents();
+  applyDraftToInputs('today');
+  applyDraftToInputs('calendar');
   renderAll();
   switchTab('dashboard');
   registerSW();
