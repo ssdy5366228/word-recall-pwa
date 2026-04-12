@@ -2,7 +2,11 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const APP_VERSION = 'v5.4.2';
+const LS_STATE_KEY = 'word_recall_pwa_state_v5_6';
+const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_5_beta'];
+const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_6';
+const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_6';
+const APP_VERSION = 'v5.6';
 
 const defaultState = {
   settings: {
@@ -70,6 +74,96 @@ function dbSet(key, value) {
     const req = tx.objectStore(STORE_APP).put(value, key);
     req.onsuccess = () => resolve();
     req.onerror = () => reject(req.error);
+  });
+}
+
+
+function localGetJSON(key, fallback = null) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function localSetJSON(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function localRemove(key) {
+  localStorage.removeItem(key);
+}
+
+function getDraftKey(kind) {
+  return kind === 'calendar' ? LS_CALENDAR_DRAFT_KEY : LS_TODAY_DRAFT_KEY;
+}
+
+function getDraft(kind) {
+  return localGetJSON(getDraftKey(kind), { word: '', meaning: '', example: '', tags: '' }) || { word: '', meaning: '', example: '', tags: '' };
+}
+
+function saveDraft(kind, draft) {
+  localSetJSON(getDraftKey(kind), {
+    word: String(draft?.word || ''),
+    meaning: String(draft?.meaning || ''),
+    example: String(draft?.example || ''),
+    tags: String(draft?.tags || ''),
+  });
+}
+
+function clearDraft(kind) {
+  localRemove(getDraftKey(kind));
+}
+
+function autoResizeTextarea(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  const maxHeight = 180;
+  const next = Math.min(el.scrollHeight, maxHeight);
+  el.style.height = `${Math.max(next, 72)}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+}
+
+
+function applyDraftToInputs(kind) {
+  const draft = getDraft(kind);
+  if (kind === 'calendar') {
+    const wordEl = document.getElementById('calendarWordInput');
+    const meaningEl = document.getElementById('calendarMeaningInput');
+    const exampleEl = document.getElementById('calendarExampleInput');
+    const tagEl = document.getElementById('calendarTagInput');
+    if (wordEl) wordEl.value = draft.word || '';
+    if (meaningEl) { meaningEl.value = draft.meaning || ''; autoResizeTextarea(meaningEl); }
+    if (exampleEl) exampleEl.value = draft.example || '';
+    if (tagEl) tagEl.value = draft.tags || '';
+    return;
+  }
+  const wordEl = document.getElementById('wordInput');
+  const meaningEl = document.getElementById('meaningInput');
+  const exampleEl = document.getElementById('exampleInput');
+  const tagEl = document.getElementById('tagInput');
+  if (wordEl) wordEl.value = draft.word || '';
+  if (meaningEl) { meaningEl.value = draft.meaning || ''; autoResizeTextarea(meaningEl); }
+  if (exampleEl) exampleEl.value = draft.example || '';
+  if (tagEl) tagEl.value = draft.tags || '';
+}
+
+function captureDraftFromInputs(kind) {
+  if (kind === 'calendar') {
+    saveDraft('calendar', {
+      word: document.getElementById('calendarWordInput')?.value || '',
+      meaning: document.getElementById('calendarMeaningInput')?.value || '',
+      example: document.getElementById('calendarExampleInput')?.value || '',
+      tags: document.getElementById('calendarTagInput')?.value || '',
+    });
+    return;
+  }
+  saveDraft('today', {
+    word: document.getElementById('wordInput')?.value || '',
+    meaning: document.getElementById('meaningInput')?.value || '',
+    example: document.getElementById('exampleInput')?.value || '',
+    tags: document.getElementById('tagInput')?.value || '',
   });
 }
 
@@ -285,14 +379,43 @@ function escapeHtml(str) {
 }
 
 async function loadState() {
-  const saved = await dbGet(APP_STATE_KEY);
-  state = saved ? sanitizeImportedState(saved) : structuredClone(defaultState);
+  const saved = localGetJSON(LS_STATE_KEY, null);
+  if (saved) {
+    state = sanitizeImportedState(saved);
+    return;
+  }
+
+  for (const legacyKey of LEGACY_LS_STATE_KEYS) {
+    const legacySaved = localGetJSON(legacyKey, null);
+    if (legacySaved) {
+      state = sanitizeImportedState(legacySaved);
+      localSetJSON(LS_STATE_KEY, state);
+      return;
+    }
+  }
+
+  try {
+    db = await openDB();
+    const legacy = await dbGet(APP_STATE_KEY);
+    if (legacy) {
+      state = sanitizeImportedState(legacy);
+      localSetJSON(LS_STATE_KEY, state);
+      return;
+    }
+  } catch (error) {
+    console.warn('Legacy IndexedDB migration skipped:', error);
+  }
+
+  state = structuredClone(defaultState);
+  localSetJSON(LS_STATE_KEY, state);
 }
 
 async function saveState(nextState = state) {
-  await dbSet(APP_STATE_KEY, nextState);
-  state = nextState;
+  const prepared = sanitizeImportedState(nextState);
+  localSetJSON(LS_STATE_KEY, prepared);
+  state = prepared;
 }
+
 
 function resetNormalReviewSession() {
   reviewSession = null;
@@ -351,6 +474,7 @@ function startWrongBookSession() {
     completed: false,
     roundCompleted: false,
     batchOrders: {},
+    roundRatings: {},
     autoAgainReady: false,
   };
 }
@@ -378,10 +502,13 @@ function ensureWrongBookSession() {
 
 function getSessionBatch(session) {
   if (session.type === 'wrongbook') {
-    const queue = session.queueIds.map(id => getWrongBookItems().find(word => word.id === id)).filter(Boolean);
+    const queue = session.queueIds.map(id => {
+      const word = state.words.find(w => w.id === id);
+      return word ? { ...word, errorCount: getWrongBookMap().get(id) ?? 1 } : null;
+    }).filter(Boolean);
     const batches = chunk(queue, session.batchSize);
     const baseBatch = batches[session.batchIndex] || [];
-    const orderKey = `${session.phase}_${session.batchIndex}`;
+    const orderKey = `${session.batchIndex}`;
     session.batchOrders = session.batchOrders || {};
     if (!session.batchOrders[orderKey]) {
       session.batchOrders[orderKey] = shuffleArray(baseBatch.map(word => word.id));
@@ -394,7 +521,7 @@ function getSessionBatch(session) {
   const baseBatches = chunk(queue.map(word => word.id), session.batchSize);
   if (!Array.isArray(session.currentPoolIds)) session.currentPoolIds = baseBatches[session.batchIndex] || [];
   const poolWords = session.currentPoolIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
-  const orderKey = `${session.batchIndex}_${session.phase}_${session.remedialRound || 0}_${session.currentPoolIds.join('|')}`;
+  const orderKey = `${session.batchIndex}_${session.remedialRound || 0}_${session.currentPoolIds.join('|')}`;
   session.batchOrders = session.batchOrders || {};
   if (!session.batchOrders[orderKey]) {
     session.batchOrders[orderKey] = shuffleArray(poolWords.map(word => word.id));
@@ -714,8 +841,8 @@ function renderWrongBook() {
   }
 
   const actions = document.getElementById('wrongbookActions');
-  const submit = async (delta, rating) => {
-    await finishWrongBookReviewStep(delta, rating);
+  const submit = async (rating) => {
+    await finishWrongBookReviewStep(rating);
     await saveState();
     renderAll();
   };
@@ -729,16 +856,16 @@ function renderWrongBook() {
         <button class="btn again" data-action="again">Again</button>
       </div>
     `;
-    actions.querySelector('[data-action="easy"]').onclick = () => submit(-1, 'Easy');
-    actions.querySelector('[data-action="good"]').onclick = () => submit(-1, 'Good');
-    actions.querySelector('[data-action="hard"]').onclick = () => submit(-1, 'Hard');
-    actions.querySelector('[data-action="again"]').onclick = () => submit(1, 'Again');
+    actions.querySelector('[data-action="easy"]').onclick = () => submit('Easy');
+    actions.querySelector('[data-action="good"]').onclick = () => submit('Good');
+    actions.querySelector('[data-action="hard"]').onclick = () => submit('Hard');
+    actions.querySelector('[data-action="again"]').onclick = () => submit('Again');
   } else if (session.autoAgainReady) {
     actions.innerHTML = `
       <div class="small" style="color:#be123c">已自动判定为 Again。</div>
       <div class="button-row wrap"><button class="btn again" data-action="autoAgain">已判 Again，下一题</button></div>
     `;
-    actions.querySelector('[data-action="autoAgain"]').onclick = () => submit(1, 'Again');
+    actions.querySelector('[data-action="autoAgain"]').onclick = () => submit('Again');
   } else {
     actions.innerHTML = `
       <div class="small muted">输入正确后，选择一个正确标签，会自动记录并进入下一题。</div>
@@ -748,17 +875,22 @@ function renderWrongBook() {
         <button class="btn hard" data-action="hard">Hard</button>
       </div>
     `;
-    actions.querySelector('[data-action="easy"]').onclick = () => submit(-1, 'Easy');
-    actions.querySelector('[data-action="good"]').onclick = () => submit(-1, 'Good');
-    actions.querySelector('[data-action="hard"]').onclick = () => submit(-1, 'Hard');
+    actions.querySelector('[data-action="easy"]').onclick = () => submit('Easy');
+    actions.querySelector('[data-action="good"]').onclick = () => submit('Good');
+    actions.querySelector('[data-action="hard"]').onclick = () => submit('Hard');
   }
 }
 
-async function finishWrongBookReviewStep(delta, rating) {
+
+async function finishWrongBookReviewStep(rating) {
   const session = wrongBookSession;
   const { batches, batch, item } = getSessionBatch(session);
   if (!item || !rating) return;
-  adjustWrongBookCount(item.id, delta);
+  const result = session.roundRatings[item.id] || {};
+  if (session.phase === 1) result.phase1 = rating;
+  if (session.phase === 2) result.phase2 = rating;
+  session.roundRatings[item.id] = result;
+
   state.logs.unshift({
     id: uuid(),
     ts: new Date().toLocaleString('zh-CN'),
@@ -769,16 +901,25 @@ async function finishWrongBookReviewStep(delta, rating) {
     addedToWrongBook: false,
     inputValue: session.inputValue,
   });
+
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
   const isLastBatch = session.batchIndex >= batches.length - 1;
   session.showAnswer = false;
   session.autoAgainReady = false;
   session.inputValue = '';
+
+  if (session.phase === 1) {
+    if (!isLastWordInBatch) session.wordIndex += 1;
+    else { session.phase = 2; session.wordIndex = 0; }
+    return;
+  }
+
+  const bothCorrect = result.phase1 !== 'Again' && result.phase2 !== 'Again';
+  adjustWrongBookCount(item.id, bothCorrect ? -1 : 1);
+  delete session.roundRatings[item.id];
+
   if (!isLastWordInBatch) {
     session.wordIndex += 1;
-  } else if (session.phase === 1) {
-    session.phase = 2;
-    session.wordIndex = 0;
   } else if (!isLastBatch) {
     session.batchIndex += 1;
     session.phase = 1;
@@ -1123,6 +1264,7 @@ function openEditModal(wordId) {
   if (!word) return;
   document.getElementById('editWordInput').value = word.word || '';
   document.getElementById('editMeaningInput').value = word.meaning || '';
+  autoResizeTextarea(document.getElementById('editMeaningInput'));
   document.getElementById('editExampleInput').value = word.example || '';
   document.getElementById('editTagInput').value = (word.tags || []).join(', ');
   document.getElementById('editCreatedAtInput').value = word.createdAt || todayStr();
@@ -1201,11 +1343,13 @@ async function handleAddTodayWord() {
   const tags = document.getElementById('tagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
-  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('wordInput').value = '';
   document.getElementById('meaningInput').value = '';
+  autoResizeTextarea(document.getElementById('meaningInput'));
   document.getElementById('exampleInput').value = '';
   document.getElementById('tagInput').value = '';
+  clearDraft('today');
   showToast('已添加到今天');
 }
 
@@ -1216,11 +1360,13 @@ async function handleAddWordToSelectedDate() {
   const tags = document.getElementById('calendarTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
   const result = await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
-  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
+  if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('calendarWordInput').value = '';
   document.getElementById('calendarMeaningInput').value = '';
+  autoResizeTextarea(document.getElementById('calendarMeaningInput'));
   document.getElementById('calendarExampleInput').value = '';
   document.getElementById('calendarTagInput').value = '';
+  clearDraft('calendar');
   showToast(`已添加到 ${selectedDate}`);
 }
 
@@ -1230,6 +1376,11 @@ function bindEvents() {
   });
 
   document.getElementById('addWordBtn').addEventListener('click', handleAddTodayWord);
+  ['wordInput', 'meaningInput', 'exampleInput', 'tagInput'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('today'));
+  });
+  const meaningInputEl = document.getElementById('meaningInput');
+  if (meaningInputEl) { meaningInputEl.addEventListener('input', () => autoResizeTextarea(meaningInputEl)); autoResizeTextarea(meaningInputEl); }
   document.getElementById('addBatchDemoBtn').addEventListener('click', async () => {
     const demo = [
       ['negotiate', '谈判；协商', 'We need to negotiate a better price.', ['工作', '口语']],
@@ -1255,6 +1406,13 @@ function bindEvents() {
     showToast(skipped ? `已导入 ${added} 个示例，跳过 ${skipped} 个重复单词` : `已导入 ${added} 个示例`);
   });
   document.getElementById('addWordToSelectedDateBtn').addEventListener('click', handleAddWordToSelectedDate);
+  ['calendarWordInput', 'calendarMeaningInput', 'calendarExampleInput', 'calendarTagInput'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('calendar'));
+  });
+  const calendarMeaningInputEl = document.getElementById('calendarMeaningInput');
+  if (calendarMeaningInputEl) { calendarMeaningInputEl.addEventListener('input', () => autoResizeTextarea(calendarMeaningInputEl)); autoResizeTextarea(calendarMeaningInputEl); }
+  const editMeaningInputEl = document.getElementById('editMeaningInput');
+  if (editMeaningInputEl) { editMeaningInputEl.addEventListener('input', () => autoResizeTextarea(editMeaningInputEl)); }
 
   document.getElementById('librarySearchInput').addEventListener('input', (e) => {
     librarySearch = e.target.value || '';
@@ -1413,6 +1571,8 @@ function bindEvents() {
   document.getElementById('clearAllBtn').addEventListener('click', async () => {
     if (!confirm('确定清空所有本地数据吗？')) return;
     state = structuredClone(defaultState);
+    clearDraft('today');
+    clearDraft('calendar');
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
@@ -1433,7 +1593,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.3.1');
+      await navigator.serviceWorker.register('./sw.js?v=5.5-beta');
     } catch {
       // ignore
     }
@@ -1446,6 +1606,8 @@ async function registerSW() {
   selectedDate = todayStr();
   calendarCursor = new Date();
   bindEvents();
+  applyDraftToInputs('today');
+  applyDraftToInputs('calendar');
   renderAll();
   switchTab('dashboard');
   registerSW();

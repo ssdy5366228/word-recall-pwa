@@ -8,15 +8,15 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.4.2" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.4.2" />
-  <link rel="stylesheet" href="./styles.css?v=5.4.2" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.5-beta" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.5-beta" />
+  <link rel="stylesheet" href="./styles.css?v=5.5-beta" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>Word Recall</h1>
-      <p class="sub">PWA + IndexedDB + JSON Backup</p>
+      <p class="sub">PWA + Stable Local Storage + JSON Backup</p>
     </div>
   </header>
 
@@ -48,7 +48,7 @@
           <p>4. 错词本复习也按“每日新学词数”作为批次大小运行；正确一次减 1，错误一次加 1，到 0 自动移出。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.4.2</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.5-beta</div>
     </section>
 
     <section id="review" class="view">
@@ -92,7 +92,7 @@
         <input id="wordInput" placeholder="例如 negotiate" />
 
         <label for="meaningInput">中文释义</label>
-        <input id="meaningInput" placeholder="例如 谈判；协商" />
+        <textarea id="meaningInput" class="autosize-textarea" rows="3" placeholder="例如 谈判；协商"></textarea>
 
         <label for="exampleInput">例句（可选）</label>
         <textarea id="exampleInput" placeholder="例如 We need to negotiate a better price."></textarea>
@@ -138,7 +138,7 @@
           <label for="calendarWordInput">英文单词</label>
           <input id="calendarWordInput" />
           <label for="calendarMeaningInput">中文释义</label>
-          <input id="calendarMeaningInput" />
+          <textarea id="calendarMeaningInput" class="autosize-textarea" rows="3"></textarea>
           <label for="calendarExampleInput">例句（可选）</label>
           <textarea id="calendarExampleInput"></textarea>
           <label for="calendarTagInput">标签（逗号分隔）</label>
@@ -258,7 +258,7 @@
       <input id="editWordInput" />
 
       <label for="editMeaningInput">中文释义</label>
-      <input id="editMeaningInput" />
+      <textarea id="editMeaningInput" class="autosize-textarea" rows="3"></textarea>
 
       <label for="editExampleInput">例句（可选）</label>
       <textarea id="editExampleInput"></textarea>
@@ -269,13 +269,13 @@
       <label for="editCreatedAtInput">录入日期</label>
       <input id="editCreatedAtInput" type="date" />
 
-      <div class="button-row wrap">
+      <div class="button-row wrap modal-actions">
         <button class="btn primary" id="saveEditBtn">保存修改</button>
         <button class="btn" id="cancelEditBtn">取消</button>
       </div>
     </div>
   </div>
 
-  <script src="./app.js?v=5.4.2" defer></script>
+  <script src="./app.js?v=5.6" defer></script>
 </body>
 </html>

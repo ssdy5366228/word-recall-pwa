@@ -1,8 +1,8 @@
-Word Recall v5.4.2
+Word Recall v5.6
 
-- 复习 / 错词复习输入框增加 autocorrect 关闭等限制（录入界面保持不变）
-- 词库列表支持左划显示编辑 / 删除
-- 日历当天录入列表支持左划显示编辑 / 删除
-- 普通复习新增批内 Again 词补救复习：两轮后继续练 Again 词，直到当前批次无 Again 再进入下一批
-- 修复底部导航遮挡内容
-- 缓存版本更新到 5.4.2
+Built from v5.5-beta and upgraded with:
+- normal review uses one shared random order across English→Chinese and Chinese→English within the same batch
+- wrong-book review settles error count only after both directions are completed for a word
+- edit modal improved for mobile: safer position, scrollable body, sticky bottom actions, date field contained
+- Chinese meaning fields in add/edit forms auto-grow with content
+- localStorage state key/version/cache updated to v5.6, with migration from v5.5-beta local state

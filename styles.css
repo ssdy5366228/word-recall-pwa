@@ -215,22 +215,25 @@ textarea { min-height: 96px; resize: vertical; }
   font-size: 13px;
   z-index: 30;
 }
-.modal { position: fixed; inset: 0; z-index: 25; }
+.modal { position: fixed; inset: 0; z-index: 25; display: flex; align-items: center; justify-content: center; padding: max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(15, 23, 42, 0.42); }
 .modal-panel {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom));
-  max-width: 720px;
-  margin: 0 auto;
+  position: relative;
+  width: min(720px, 100%);
+  max-height: calc(100vh - max(24px, env(safe-area-inset-top)) - max(24px, env(safe-area-inset-bottom)));
+  overflow: auto;
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 20px;
   padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
   box-shadow: 0 18px 48px rgba(15, 23, 42, 0.18);
 }
 .modal-title { font-size: 17px; font-weight: 800; }
+.modal-panel input, .modal-panel textarea, .modal-panel select { width: 100%; max-width: 100%; box-sizing: border-box; }
+.modal-panel input[type="date"] { min-width: 0; display: block; }
+.modal-actions { position: sticky; bottom: calc(-16px - env(safe-area-inset-bottom)); background: #fff; padding-top: 12px; margin-top: 12px; }
+.autosize-textarea { resize: none; overflow: hidden; min-height: 72px; }
 @media (min-width: 700px) {
   .bottom-nav {
     max-width: 900px;
@@ -242,5 +245,4 @@ textarea { min-height: 96px; resize: vertical; }
     border-top-left-radius: 18px;
     border-top-right-radius: 18px;
   }
-  .modal-panel { left: 50%; right: auto; transform: translateX(-50%); width: 720px; }
 }
