@@ -1,8 +1,10 @@
-Word Recall v5.6
+Word Recall v5.6.1
 
 Built from v5.5-beta and upgraded with:
 - normal review uses one shared random order across English→Chinese and Chinese→English within the same batch
 - wrong-book review settles error count only after both directions are completed for a word
 - edit modal improved for mobile: safer position, scrollable body, sticky bottom actions, date field contained
 - Chinese meaning fields in add/edit forms auto-grow with content
-- localStorage state key/version/cache updated to v5.6, with migration from v5.5-beta local state
+- localStorage state key/version/cache updated to v5.6.1, with migration from v5.6 and v5.5-beta local state
+
+- wrong-book list now sorts by error count descending, then created date ascending, then word alphabetically

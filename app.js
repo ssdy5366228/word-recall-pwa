@@ -2,11 +2,11 @@ const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 2;
 const STORE_APP = 'app';
 const APP_STATE_KEY = 'state';
-const LS_STATE_KEY = 'word_recall_pwa_state_v5_6';
-const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_5_beta'];
-const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_6';
-const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_6';
-const APP_VERSION = 'v5.6';
+const LS_STATE_KEY = 'word_recall_pwa_state_v5_6_1';
+const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_6', 'word_recall_pwa_state_v5_5_beta'];
+const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_6_1';
+const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_6_1';
+const APP_VERSION = 'v5.6.1';
 
 const defaultState = {
   settings: {
@@ -351,7 +351,13 @@ function getWrongBookItems() {
       return word ? { ...word, errorCount: item.errorCount } : null;
     })
     .filter(Boolean)
-    .sort((a, b) => (b.errorCount - a.errorCount) || a.word.localeCompare(b.word));
+    .sort((a, b) => {
+      const countDiff = (Number(b.errorCount) || 0) - (Number(a.errorCount) || 0);
+      if (countDiff !== 0) return countDiff;
+      const dateDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+      if (dateDiff !== 0) return dateDiff;
+      return String(a.word || '').localeCompare(String(b.word || ''));
+    });
 }
 
 function getTodayDueWords(targetDate = todayStr()) {
