@@ -1,10 +1,39 @@
-Word Recall v5.6.1
+Word Recall v5.7（正式版）
 
-Built from v5.5-beta and upgraded with:
-- normal review uses one shared random order across English→Chinese and Chinese→English within the same batch
-- wrong-book review settles error count only after both directions are completed for a word
-- edit modal improved for mobile: safer position, scrollable body, sticky bottom actions, date field contained
-- Chinese meaning fields in add/edit forms auto-grow with content
-- localStorage state key/version/cache updated to v5.6.1, with migration from v5.6 and v5.5-beta local state
+本版本直接基于 v5.6.1 正式包迭代，版本常量统一为 5.7.0。
 
-- wrong-book list now sorts by error count descending, then created date ascending, then word alphabetically
+一、数据安全
+- 评分、跳过、提示、显示答案在提交期间立即锁定，防止连续点击误判后续单词。
+- 保存操作使用串行队列，避免多个异步写入互相覆盖。
+- IndexedDB 作为主存储，localStorage 作为镜像存储；至少一份写入成功才继续。
+- 读取失败、JSON 损坏或历史数据异常归零时停止初始化，不再自动写入空词库。
+- 保存 revision、savedAt、wordCount、logCount 和 checksum，用于启动校验和异常缩减保护。
+- 自动快照：每日首次保存、导入、迁移、清空和恢复前创建快照；支持查看、导出和恢复。
+- 导入与版本迁移采用非破坏流程，旧版本存储键继续保留。
+- 日志页面按需显示，评分后只更新必要界面，降低 iPhone Safari 卡顿风险。
+
+二、复习与错词调度
+- 正常复习延长至 60、90、180 天，并继续长期循环。
+- Hard / Again 进入优先级更高的活跃恢复队列。
+- Again 当天补强并安排次日复习；Hard 根据是否使用提示缩短下次间隔。
+- 历史错词按每日限额逐步释放，默认 8 个，可在设置中调整。
+- 历史累计错误次数与当前活跃恢复状态分离，不再要求错误次数减到 0 才退出恢复队列。
+- 错词仍需完成英→中和中→英两个方向，按较差结果统一结算。
+
+三、评分标准与提示
+- 保留 Easy / Good / Hard / Again 四档。
+- 轻提示后本题最高只能判 Hard，并记录 usedHint。
+- 点击“不会，显示答案”后自动判 Again。
+
+四、发音与例句
+- 使用浏览器系统英文语音，支持美音 / 英音和自动播放设置。
+- 英文→中文可播放；中文→英文出题阶段隐藏发音，避免泄露答案。
+- 录入、编辑、词库和复习卡均可播放发音。
+- 支持自动补充简单英文例句及中文翻译；优先在线词典，失败时使用可编辑本地模板。
+
+五、数据迁移
+- 支持从 v5.6.1、v5.6、v5.5-beta 读取并迁移本地数据和草稿。
+- 导入 JSON 前会校验结构并创建快照。
+
+部署：将本文件夹中的全部文件上传至 GitHub Pages 仓库根目录。
+建议：首次部署后先导入已恢复的 969 词 JSON，核对词数、错词数和日志数，再继续正式学习。

@@ -1,32 +1,24 @@
-const CACHE_NAME = 'word-recall-pwa-5.6.1';
+const CACHE_NAME = 'word-recall-pwa-5.7.0';
 const ASSETS = [
   './',
   './index.html',
-  './index.html?v=5.6.1',
-  './styles.css?v=5.6.1',
-  './app.js?v=5.6.1',
-  './manifest.webmanifest?v=5.6.1',
-  './icon-180.png?v=5.6.1',
-  './icon-512.png?v=5.6.1'
+  './index.html?v=5.7.0',
+  './styles.css?v=5.7.0',
+  './app.js?v=5.7.0',
+  './manifest.webmanifest?v=5.7.0',
+  './icon-180.png?v=5.7.0',
+  './icon-512.png?v=5.7.0'
 ];
 
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(ASSETS))
-      .then(() => self.skipWaiting())
-  );
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
 });
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+self.addEventListener('activate', event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
 
-self.addEventListener('fetch', (event) => {
+self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
 

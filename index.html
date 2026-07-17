@@ -8,24 +8,25 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.5-beta" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.5-beta" />
-  <link rel="stylesheet" href="./styles.css?v=5.5-beta" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.7.0" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.7.0" />
+  <link rel="stylesheet" href="./styles.css?v=5.7.0" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>Word Recall</h1>
-      <p class="sub">PWA + Stable Local Storage + JSON Backup</p>
+      <p class="sub">长期复习 + 薄弱词恢复 + 发音 + 例句</p>
     </div>
   </header>
 
   <main class="app-main">
     <section id="dashboard" class="view active">
       <div class="stats-grid">
-        <article class="card stat-card"><div class="label">今日待复习</div><div class="value" id="todayDueCount">0</div></article>
-        <article class="card stat-card"><div class="label">今日新学目标</div><div class="value" id="todayNewQuota">10</div></article>
-        <article class="card stat-card"><div class="label">错词本词数</div><div class="value" id="wrongWordCount">0</div></article>
+        <article class="card stat-card"><div class="label">今日正常复习</div><div class="value" id="todayDueCount">0</div></article>
+        <article class="card stat-card"><div class="label">今日薄弱词</div><div class="value" id="todayRecoveryCount">0</div></article>
+        <article class="card stat-card"><div class="label">今日新学目标</div><div class="value" id="todayNewQuota">5</div></article>
+        <article class="card stat-card"><div class="label">活跃错词</div><div class="value" id="wrongWordCount">0</div></article>
         <article class="card stat-card"><div class="label">总词数</div><div class="value" id="totalWordCount">0</div></article>
       </div>
 
@@ -35,20 +36,21 @@
       </article>
 
       <article class="card">
-        <div class="section-title">今日待复习日期批次</div>
+        <div class="section-title">今日正常复习阶段</div>
         <div id="batchSummary"></div>
       </article>
 
       <article class="card">
         <div class="section-title">使用说明</div>
         <div class="notes" id="usageNotes">
-          <p>1. 先录入单词，再进入“复习”。</p>
-          <p>2. 普通复习按“每日新学词数”作为每批复习词数运行，先做英文→中文，再做中文→英文。</p>
-          <p>3. 每一批都会随机排序，第二轮重新随机；本批出现 Again 的词会在两轮后继续补救复习。</p>
-          <p>4. 错词本复习也按“每日新学词数”作为批次大小运行；正确一次减 1，错误一次加 1，到 0 自动移出。</p>
+          <p>1. 普通复习先做英文→中文，再做中文→英文；同一批两轮共用同一随机顺序。</p>
+          <p>2. Again 会在本批后当天补救，并进入次日薄弱词恢复；Hard 会安排近期再次复习。</p>
+          <p>3. 历史错词按每日上限逐步释放，不再一次面对全部积压词。</p>
+          <p>4. 正常复习已延长到 60 / 90 / 180 天，最后阶段继续按长期间隔循环。</p>
+          <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.5-beta</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.7</div>
     </section>
 
     <section id="review" class="view">
@@ -59,16 +61,22 @@
         <div id="reviewDone" class="done-box hidden"></div>
         <div id="reviewBox" class="hidden">
           <p class="muted" id="reviewModeText">第一轮：先看英文，心里回忆中文意思</p>
-          <div class="prompt" id="reviewPrompt"></div>
+          <div class="prompt-row">
+            <div class="prompt" id="reviewPrompt"></div>
+            <button class="icon-btn hidden" id="reviewSpeakBtn" type="button" aria-label="播放发音">🔊</button>
+          </div>
           <div class="meta" id="reviewMeta"></div>
+          <div id="reviewHintBox" class="hint-box hidden"></div>
 
           <div id="reviewInputWrap" class="hidden">
             <label for="reviewInputEnglish">输入你回忆出的英文</label>
             <input id="reviewInputEnglish" placeholder="在这里输入英文" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done" data-gramm="false" />
           </div>
 
-          <div class="button-row">
-            <button class="btn primary" id="showAnswerBtn">显示答案</button>
+          <div class="button-row wrap" id="reviewPreAnswerActions">
+            <button class="btn" id="hintBtn">轻提示</button>
+            <button class="btn primary" id="showAnswerBtn">核对答案</button>
+            <button class="btn again" id="giveUpBtn">不会，显示答案</button>
             <button class="btn" id="skipBtn">跳过</button>
           </div>
 
@@ -76,6 +84,7 @@
             <p><strong>答案：</strong><span id="answerWord"></span></p>
             <p><strong>释义：</strong><span id="answerMeaning"></span></p>
             <p><strong>例句：</strong><span id="answerExample"></span></p>
+            <p id="answerExampleMeaningRow" class="hidden"><strong>例句中文：</strong><span id="answerExampleMeaning"></span></p>
             <p id="reviewInputEchoRow" class="hidden"><strong>你的拼写：</strong><span id="attemptResult"></span></p>
             <p id="reviewAutoJudge" class="judge-text"></p>
           </div>
@@ -89,13 +98,23 @@
       <article class="card">
         <div class="section-title">录入单词</div>
         <label for="wordInput">英文单词</label>
-        <input id="wordInput" placeholder="例如 negotiate" />
+        <div class="inline-control">
+          <input id="wordInput" placeholder="例如 negotiate" />
+          <button class="icon-btn" id="speakAddWordBtn" type="button" aria-label="播放发音">🔊</button>
+        </div>
 
         <label for="meaningInput">中文释义</label>
         <textarea id="meaningInput" class="autosize-textarea" rows="3" placeholder="例如 谈判；协商"></textarea>
 
-        <label for="exampleInput">例句（可选）</label>
+        <label for="exampleInput">英文例句（可选）</label>
         <textarea id="exampleInput" placeholder="例如 We need to negotiate a better price."></textarea>
+        <div class="button-row wrap compact-row">
+          <button class="btn small-btn" id="generateExampleBtn" type="button">自动补充简单例句</button>
+          <span class="small muted" id="exampleLookupStatus"></span>
+        </div>
+
+        <label for="exampleMeaningInput">例句中文（可选，可自行修改）</label>
+        <textarea id="exampleMeaningInput" placeholder="例如 我们需要协商一个更好的价格。"></textarea>
 
         <label for="tagInput">标签（逗号分隔，如 口语,工作,旅行）</label>
         <input id="tagInput" placeholder="口语, 工作" />
@@ -105,7 +124,7 @@
           <button class="btn" id="addBatchDemoBtn">导入 5 个示例</button>
         </div>
 
-        <p class="muted small">这里默认把新词录入到今天；如果你想补录到其他日期，请到“日历”页操作。</p>
+        <p class="muted small">自动例句优先在线查询词典中的真实例句；查询不到时生成一个可编辑的本地简单例句。</p>
       </article>
     </section>
 
@@ -114,7 +133,7 @@
         <div class="calendar-head">
           <div>
             <div class="section-title" id="calendarTitle">日历</div>
-            <div class="small muted">点某一天后，可查看当天录入单词、补录，并通过左划词条显示编辑/删除，从该日批次进入复习。</div>
+            <div class="small muted">点某一天后，可查看当天录入单词、补录，并通过左划词条显示编辑/删除。</div>
           </div>
           <div class="calendar-controls">
             <select id="calendarYearSelect"></select>
@@ -136,11 +155,20 @@
         <div class="inline-form" id="calendarAddForm">
           <div class="section-subtitle">向这一天新增单词</div>
           <label for="calendarWordInput">英文单词</label>
-          <input id="calendarWordInput" />
+          <div class="inline-control">
+            <input id="calendarWordInput" />
+            <button class="icon-btn" id="speakCalendarWordBtn" type="button" aria-label="播放发音">🔊</button>
+          </div>
           <label for="calendarMeaningInput">中文释义</label>
           <textarea id="calendarMeaningInput" class="autosize-textarea" rows="3"></textarea>
-          <label for="calendarExampleInput">例句（可选）</label>
+          <label for="calendarExampleInput">英文例句（可选）</label>
           <textarea id="calendarExampleInput"></textarea>
+          <div class="button-row wrap compact-row">
+            <button class="btn small-btn" id="generateCalendarExampleBtn" type="button">自动补充简单例句</button>
+            <span class="small muted" id="calendarExampleLookupStatus"></span>
+          </div>
+          <label for="calendarExampleMeaningInput">例句中文（可选）</label>
+          <textarea id="calendarExampleMeaningInput"></textarea>
           <label for="calendarTagInput">标签（逗号分隔）</label>
           <input id="calendarTagInput" />
           <div class="button-row wrap">
@@ -155,7 +183,7 @@
     <section id="library" class="view">
       <article class="card">
         <div class="section-title">词库</div>
-        <div class="small muted">左划词条可显示编辑和删除。阶段表示该单词在 0 / 1 / 3 / 7 / 14 / 30 这组间隔中的位置。</div>
+        <div class="small muted">左划词条可显示编辑和删除。喇叭按钮可直接播放英文发音。</div>
         <div class="button-row wrap" style="margin-top:12px;">
           <input id="librarySearchInput" placeholder="搜索英文 / 中文 / 标签 / 例句" style="flex:1;min-width:220px;" />
           <button class="btn" id="librarySearchClearBtn">清空搜索</button>
@@ -167,18 +195,18 @@
 
     <section id="wrongbook" class="view">
       <article class="card">
-        <div class="section-title">错词本复习</div>
+        <div class="section-title">薄弱词 / 错词恢复</div>
         <div id="wrongbookDone" class="done-box hidden"></div>
         <div id="wrongbookRoundDone" class="banner hidden"></div>
         <div id="wrongbookReviewBox"></div>
       </article>
 
       <article class="card" id="wrongbookListCard">
-        <div class="section-title">错词本列表</div>
+        <div class="section-title">活跃薄弱词列表</div>
         <div class="button-row wrap no-top-margin">
-          <button class="btn" id="wrongbookListToggleBtn">展开错词列表</button>
+          <button class="btn" id="wrongbookListToggleBtn">展开列表</button>
         </div>
-        <div class="small muted">为避免影响错词复习，列表默认折叠隐藏；需要时再展开查看。</div>
+        <div class="small muted">列表默认折叠。历史积压词会按每日上限逐步释放；近期 Hard / Again 优先。</div>
         <div id="wrongbookList" class="list-stack" style="margin-top: 12px;"></div>
       </article>
     </section>
@@ -192,30 +220,76 @@
 
     <section id="settings" class="view">
       <article class="card">
-        <div class="section-title">设置</div>
+        <div class="section-title">复习设置</div>
 
         <label for="dailyQuotaSelect">每日新学词数（同时作为每批复习词数）</label>
         <select id="dailyQuotaSelect">
-          <option value="10">10</option>
           <option value="5">5</option>
+          <option value="10">10</option>
         </select>
-        <div class="small muted" style="margin-top:8px;">这个值会同时影响普通复习和错词复习的批次大小与两轮换批节奏。</div>
 
-        <label for="intervalInput">复习间隔（天，逗号分隔）</label>
-        <input id="intervalInput" value="0,1,3,7,14,30" inputmode="numeric" />
-        <div class="small muted" style="margin-top:8px;">保存后会自动联动：今日待复习、今日待复习批次、日历复习数、普通复习和错词复习；旧阶段会自动兼容重映射。</div>
+        <label for="intervalInput">正常复习间隔（天，逗号分隔）</label>
+        <input id="intervalInput" value="0,1,3,7,14,21,30,60,90,180" inputmode="numeric" />
+        <div class="small muted" style="margin-top:8px;">最后一个阶段完成后，会继续按最后间隔做长期循环，不再在第 30 天结束。</div>
+
+        <label for="backlogDailyLimitSelect">每日释放历史积压错词</label>
+        <select id="backlogDailyLimitSelect">
+          <option value="5">5 个</option>
+          <option value="8">8 个</option>
+          <option value="10">10 个</option>
+        </select>
+
+        <label for="longTermDailyLimitSelect">每日释放逾期正常旧词</label>
+        <select id="longTermDailyLimitSelect">
+          <option value="3">3 个</option>
+          <option value="5">5 个</option>
+          <option value="8">8 个</option>
+        </select>
 
         <div class="button-row wrap">
-          <button class="btn primary" id="saveSettingsBtn">保存复习间隔</button>
+          <button class="btn primary" id="saveSettingsBtn">保存设置</button>
           <button class="btn danger-outline" id="clearAllBtn">清空全部数据</button>
         </div>
-
         <div id="settingsMsg" class="banner hidden"></div>
       </article>
 
       <article class="card">
+        <div class="section-title">发音设置</div>
+        <label for="pronunciationLocaleSelect">发音类型</label>
+        <select id="pronunciationLocaleSelect">
+          <option value="en-US">美式英语</option>
+          <option value="en-GB">英式英语</option>
+        </select>
+        <label class="check-row" for="autoPronounceCheckbox">
+          <input id="autoPronounceCheckbox" type="checkbox" />
+          <span>英文→中文出题时自动播放</span>
+        </label>
+        <div class="small muted">中文→英文阶段不会自动播放，也不显示发音按钮，避免泄露答案。</div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">评分标准</div>
+        <div class="rating-guide">
+          <p><strong>Easy：</strong>无提示，所有目标义项迅速、完整想起。</p>
+          <p><strong>Good：</strong>无提示，核心及主要义项主动想起，整体掌握。</p>
+          <p><strong>Hard：</strong>回忆困难或遗漏重要义项；使用轻提示后想起也只能判 Hard。</p>
+          <p><strong>Again：</strong>核心义项想不起、记错、混淆，或点击“不会，显示答案”。</p>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-title">数据安全与自动快照</div>
+        <div id="storageStatus" class="small" style="line-height:1.8;"></div>
+        <div class="button-row wrap">
+          <button class="btn primary" id="createSnapshotBtn" type="button">立即创建快照</button>
+        </div>
+        <div class="small muted">程序会在每日首次保存、导入、批量操作、迁移和清空前自动保留快照。IndexedDB 保留最近 10 份，并保留少量 localStorage 镜像快照。</div>
+        <div id="snapshotList" class="list-stack" style="margin-top:12px;"></div>
+      </article>
+
+      <article class="card">
         <div class="section-title">数据导入 / 导出</div>
-        <p class="small muted">导出 JSON 包含整套核心数据：设置、词库、错词本、运行记录；日历相关显示会根据这些数据自动恢复。</p>
+        <p class="small muted">导出 JSON 包含设置、词库、薄弱词计划和运行记录。</p>
         <div class="banner" style="background:#fff7ed;color:#b45309;">更新程序前建议先导出备份。</div>
         <div class="banner" style="background:#fef2f2;color:#dc2626;">导入 JSON 会覆盖当前本地数据。</div>
         <div id="dataMsg" class="banner hidden"></div>
@@ -255,13 +329,23 @@
     <div class="modal-panel">
       <div class="modal-title">编辑单词</div>
       <label for="editWordInput">英文单词</label>
-      <input id="editWordInput" />
+      <div class="inline-control">
+        <input id="editWordInput" />
+        <button class="icon-btn" id="speakEditWordBtn" type="button" aria-label="播放发音">🔊</button>
+      </div>
 
       <label for="editMeaningInput">中文释义</label>
       <textarea id="editMeaningInput" class="autosize-textarea" rows="3"></textarea>
 
-      <label for="editExampleInput">例句（可选）</label>
+      <label for="editExampleInput">英文例句（可选）</label>
       <textarea id="editExampleInput"></textarea>
+      <div class="button-row wrap compact-row">
+        <button class="btn small-btn" id="generateEditExampleBtn" type="button">自动补充简单例句</button>
+        <span class="small muted" id="editExampleLookupStatus"></span>
+      </div>
+
+      <label for="editExampleMeaningInput">例句中文（可选）</label>
+      <textarea id="editExampleMeaningInput"></textarea>
 
       <label for="editTagInput">标签（逗号分隔）</label>
       <input id="editTagInput" />
@@ -276,6 +360,21 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.6.1" defer></script>
+  <div id="fatalDataOverlay" class="fatal-overlay hidden">
+    <div class="fatal-panel">
+      <div class="fatal-title">数据保护已启动</div>
+      <p id="fatalDataMessage"></p>
+      <p class="small muted">程序已停止初始化和写入，不会用空词库覆盖现有存储。你可以导出诊断信息、导入可靠 JSON 备份，或恢复自动快照。</p>
+      <div class="button-row wrap">
+        <button class="btn" id="fatalExportDiagnosticBtn" type="button">导出诊断</button>
+        <label class="btn primary file-btn">导入 JSON 恢复<input type="file" id="fatalImportInput" accept="application/json" hidden /></label>
+      </div>
+      <div class="section-subtitle" style="margin-top:16px;">可用快照</div>
+      <div id="fatalSnapshotList" class="button-row wrap"></div>
+      <div id="fatalRecoveryStatus" class="small" style="margin-top:12px;color:#b91c1c;"></div>
+    </div>
+  </div>
+
+  <script src="./app.js?v=5.7.0" defer></script>
 </body>
 </html>

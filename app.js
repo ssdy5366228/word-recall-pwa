@@ -1,27 +1,49 @@
+const APP_VERSION = 'v5.7';
+const APP_VERSION_NUMBER = '5.7.0';
+const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
-const DB_VERSION = 2;
+const DB_VERSION = 7;
 const STORE_APP = 'app';
+const STORE_CURRENT = 'currentState';
+const STORE_SNAPSHOTS = 'snapshots';
+const STORE_META = 'metadata';
 const APP_STATE_KEY = 'state';
-const LS_STATE_KEY = 'word_recall_pwa_state_v5_6_1';
-const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_6', 'word_recall_pwa_state_v5_5_beta'];
-const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_6_1';
-const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_6_1';
-const APP_VERSION = 'v5.6.1';
+const CURRENT_STATE_KEY = 'current';
+const META_KEY = 'meta';
+const LS_STATE_KEY = 'word_recall_pwa_state_v5_7';
+const LS_META_KEY = 'word_recall_pwa_meta_v5_7';
+const APP_INITIALIZED_KEY = 'word_recall_app_initialized';
+const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_6_1', 'word_recall_pwa_state_v5_6', 'word_recall_pwa_state_v5_5_beta'];
+const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_7';
+const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_7';
+const LEGACY_TODAY_DRAFT_KEYS = ['word_recall_pwa_today_draft_v5_6_1', 'word_recall_pwa_today_draft_v5_6', 'word_recall_pwa_today_draft_v5_5_beta'];
+const LEGACY_CALENDAR_DRAFT_KEYS = ['word_recall_pwa_calendar_draft_v5_6_1', 'word_recall_pwa_calendar_draft_v5_6', 'word_recall_pwa_calendar_draft_v5_5_beta'];
+const MAX_SNAPSHOTS = 10;
+const MAX_LOCAL_FALLBACK_SNAPSHOTS = 3;
+const LS_SNAPSHOTS_KEY = 'word_recall_pwa_snapshots_v5_7';
+const DEFAULT_INTERVALS = [0, 1, 3, 7, 14, 21, 30, 60, 90, 180];
+const RECOVERY_DAYS = { Easy: 30, Good: 14, Hard: 3, Again: 1 };
 
 const defaultState = {
   settings: {
-    dailyQuota: 10,
-    intervals: [0, 1, 3, 7, 14, 30],
+    dailyQuota: 5,
+    intervals: DEFAULT_INTERVALS,
+    backlogDailyLimit: 8,
+    longTermDailyLimit: 5,
+    pronunciationLocale: 'en-US',
+    autoPronounce: false,
   },
   words: [],
   wrongBook: [],
   logs: [],
 };
 
-let db;
+let db = null;
+let dbOpenError = null;
 let state = structuredClone(defaultState);
 let editingWordId = null;
 let calendarCursor = new Date();
+let selectedDate = todayStr();
 let reviewContext = { type: 'today', sourceDate: null };
 let reviewSession = null;
 let wrongBookSession = null;
@@ -34,9 +56,20 @@ let pendingImportPreview = null;
 let librarySearch = '';
 let showWrongList = false;
 let activeSwipeCard = null;
+let lastAutoSpokenKey = '';
+let saveQueue = Promise.resolve();
+let currentRevision = 0;
+let lastKnownMeta = null;
+let storageHealth = { indexedDB: 'unknown', localStorage: 'unknown', warning: '' };
+let snapshotSummaries = [];
+let reviewSubmitting = false;
+let appLocked = false;
+let fatalDataDetails = null;
+let logDisplayLimit = 200;
 
 function showToast(message) {
   const el = document.getElementById('toast');
+  if (!el) return;
   el.textContent = message;
   el.classList.remove('hidden');
   clearTimeout(showToast._timer);
@@ -49,42 +82,98 @@ function uuid() {
 
 function openDB() {
   return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('IndexedDB 不可用'));
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (event) => {
+    req.onupgradeneeded = event => {
       const database = event.target.result;
       if (!database.objectStoreNames.contains(STORE_APP)) database.createObjectStore(STORE_APP);
+      if (!database.objectStoreNames.contains(STORE_CURRENT)) database.createObjectStore(STORE_CURRENT);
+      if (!database.objectStoreNames.contains(STORE_SNAPSHOTS)) database.createObjectStore(STORE_SNAPSHOTS, { keyPath: 'id' });
+      if (!database.objectStoreNames.contains(STORE_META)) database.createObjectStore(STORE_META);
     };
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
+    req.onblocked = () => reject(new Error('IndexedDB 升级被其他页面阻塞'));
   });
 }
 
-function dbGet(key) {
+function dbGetFrom(storeName, key) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_APP, 'readonly');
-    const req = tx.objectStore(STORE_APP).get(key);
+    if (!db) return reject(new Error('IndexedDB 未打开'));
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).get(key);
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(req.error || tx.error || new Error('IndexedDB 读取失败'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 读取事务中止'));
   });
 }
 
-function dbSet(key, value) {
+function dbGetAllFrom(storeName) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_APP, 'readwrite');
-    const req = tx.objectStore(STORE_APP).put(value, key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
+    if (!db) return reject(new Error('IndexedDB 未打开'));
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error || tx.error || new Error('IndexedDB 批量读取失败'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 批量读取事务中止'));
   });
 }
 
+function dbPutTo(storeName, value, key = undefined) {
+  return new Promise((resolve, reject) => {
+    if (!db) return reject(new Error('IndexedDB 未打开'));
+    const tx = db.transaction(storeName, 'readwrite');
+    const store = tx.objectStore(storeName);
+    if (key === undefined) store.put(value); else store.put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB 写入失败'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 写入事务中止'));
+  });
+}
+
+function dbDeleteFrom(storeName, key) {
+  return new Promise((resolve, reject) => {
+    if (!db) return reject(new Error('IndexedDB 未打开'));
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB 删除失败'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 删除事务中止'));
+  });
+}
+
+function dbWriteCurrentAndMeta(envelope, meta) {
+  return new Promise((resolve, reject) => {
+    if (!db) return reject(new Error('IndexedDB 未打开'));
+    const tx = db.transaction([STORE_CURRENT, STORE_META], 'readwrite');
+    tx.objectStore(STORE_CURRENT).put(envelope, CURRENT_STATE_KEY);
+    tx.objectStore(STORE_META).put(meta, META_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('IndexedDB 双写失败'));
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 双写事务中止'));
+  });
+}
+
+function safeParse(raw) {
+  if (raw == null) return { status: 'missing', raw: null };
+  try {
+    return { status: 'ok', value: JSON.parse(raw), raw };
+  } catch (error) {
+    return { status: 'corrupt', error, raw };
+  }
+}
+
+function readLocalJSON(key) {
+  try {
+    return safeParse(localStorage.getItem(key));
+  } catch (error) {
+    return { status: 'read_error', error, raw: null };
+  }
+}
 
 function localGetJSON(key, fallback = null) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
+  const result = readLocalJSON(key);
+  return result.status === 'ok' ? result.value : fallback;
 }
 
 function localSetJSON(key, value) {
@@ -95,12 +184,366 @@ function localRemove(key) {
   localStorage.removeItem(key);
 }
 
+function cloneValue(value) {
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function getInitializedFlag() {
+  try {
+    return localStorage.getItem(APP_INITIALIZED_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setInitializedFlag() {
+  try {
+    localStorage.setItem(APP_INITIALIZED_KEY, 'true');
+  } catch {
+    // IndexedDB metadata still records initialization when localStorage is unavailable.
+  }
+}
+
+function fnv1a(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
+}
+
+function checksumState(prepared) {
+  return fnv1a(JSON.stringify(prepared));
+}
+
+function validateRawStateShape(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: '数据根节点不是对象' };
+  if (!Array.isArray(raw.words)) return { ok: false, error: '缺少 words 数组' };
+  if (raw.wrongBook != null && !Array.isArray(raw.wrongBook)) return { ok: false, error: 'wrongBook 不是数组' };
+  if (raw.logs != null && !Array.isArray(raw.logs)) return { ok: false, error: 'logs 不是数组' };
+  if (raw.settings != null && (typeof raw.settings !== 'object' || Array.isArray(raw.settings))) return { ok: false, error: 'settings 不是对象' };
+  return { ok: true };
+}
+
+function normalizeStoredCandidate(value, source, fallbackMeta = null) {
+  try {
+    const envelope = value && value.state && typeof value.state === 'object' ? value : null;
+    const rawState = envelope ? envelope.state : value;
+    const shape = validateRawStateShape(rawState);
+    if (!shape.ok) return { ok: false, source, error: shape.error };
+    const prepared = sanitizeImportedState(rawState);
+    const checksum = checksumState(prepared);
+    const metadata = { ...(fallbackMeta || {}), ...(envelope?.metadata || {}) };
+    if (metadata.checksum && metadata.checksum !== checksum) {
+      return { ok: false, source, error: '校验值不一致', metadata };
+    }
+    return {
+      ok: true,
+      source,
+      state: prepared,
+      metadata: {
+        revision: Math.max(0, Number(metadata.revision || 0)),
+        savedAt: String(metadata.savedAt || ''),
+        lastKnownWordCount: Number(metadata.lastKnownWordCount ?? prepared.words.length),
+        lastKnownLogCount: Number(metadata.lastKnownLogCount ?? prepared.logs.length),
+        checksum,
+        schemaVersion: Number(metadata.schemaVersion || 0),
+        appVersion: String(metadata.appVersion || ''),
+        lastDailySnapshotDate: String(metadata.lastDailySnapshotDate || ''),
+      },
+    };
+  } catch (error) {
+    return { ok: false, source, error: error?.message || String(error) };
+  }
+}
+
+function makeMetadata(prepared, revision, options = {}) {
+  return {
+    initialized: true,
+    revision,
+    savedAt: options.savedAt || new Date().toISOString(),
+    lastKnownWordCount: prepared.words.length,
+    lastKnownLogCount: prepared.logs.length,
+    checksum: checksumState(prepared),
+    schemaVersion: SCHEMA_VERSION,
+    appVersion: APP_VERSION_NUMBER,
+    migratedFrom: options.migratedFrom || lastKnownMeta?.migratedFrom || '',
+    migrationTime: options.migrationTime || lastKnownMeta?.migrationTime || '',
+    lastDailySnapshotDate: options.lastDailySnapshotDate ?? lastKnownMeta?.lastDailySnapshotDate ?? '',
+  };
+}
+
+function makeEnvelope(prepared, metadata) {
+  return { state: cloneValue(prepared), metadata: cloneValue(metadata) };
+}
+
+function compareCandidates(a, b) {
+  const rev = Number(b.metadata?.revision || 0) - Number(a.metadata?.revision || 0);
+  if (rev) return rev;
+  const time = String(b.metadata?.savedAt || '').localeCompare(String(a.metadata?.savedAt || ''));
+  if (time) return time;
+  const sourcePriority = source => source.includes('indexeddb-current') ? 3 : source.includes('local-current') ? 2 : 1;
+  return sourcePriority(b.source) - sourcePriority(a.source);
+}
+
+function assertStateNotSuspicious(prepared, options = {}) {
+  if (options.allowLargeDecrease || !lastKnownMeta) return;
+  const previousWords = Math.max(0, Number(lastKnownMeta.lastKnownWordCount || 0));
+  const currentWords = prepared.words.length;
+  const previousLogs = Math.max(0, Number(lastKnownMeta.lastKnownLogCount || 0));
+  const currentLogs = prepared.logs.length;
+  if (previousWords > 0 && currentWords === 0) {
+    throw new Error(`异常空库保护：上次已知有 ${previousWords} 个词，本次准备保存 0 个词`);
+  }
+  if (previousWords >= 50 && previousWords - currentWords >= 20 && currentWords < previousWords * 0.5) {
+    throw new Error(`异常缩减保护：词数从 ${previousWords} 降至 ${currentWords}`);
+  }
+  if (previousLogs >= 200 && previousLogs - currentLogs >= 100 && currentLogs < previousLogs * 0.5) {
+    throw new Error(`异常缩减保护：记录数从 ${previousLogs} 降至 ${currentLogs}`);
+  }
+}
+
+async function persistPreparedState(prepared, options = {}) {
+  assertStateNotSuspicious(prepared, options);
+  const revision = options.revision != null ? Number(options.revision) : currentRevision + 1;
+  const metadata = makeMetadata(prepared, revision, options);
+  const envelope = makeEnvelope(prepared, metadata);
+  const results = { indexedDB: false, localStorage: false, errors: [] };
+
+  if (db) {
+    try {
+      await dbWriteCurrentAndMeta(envelope, metadata);
+      results.indexedDB = true;
+      storageHealth.indexedDB = 'ok';
+    } catch (error) {
+      results.errors.push(`IndexedDB：${error?.message || error}`);
+      storageHealth.indexedDB = 'error';
+    }
+  } else {
+    results.errors.push(`IndexedDB：${dbOpenError?.message || '不可用'}`);
+    storageHealth.indexedDB = 'error';
+  }
+
+  try {
+    localSetJSON(LS_STATE_KEY, envelope);
+    localSetJSON(LS_META_KEY, metadata);
+    results.localStorage = true;
+    storageHealth.localStorage = 'ok';
+  } catch (error) {
+    results.errors.push(`localStorage：${error?.message || error}`);
+    storageHealth.localStorage = 'error';
+  }
+
+  if (!results.indexedDB && !results.localStorage) {
+    appLocked = true;
+    throw new Error(`所有本地存储均保存失败。${results.errors.join('；')}`);
+  }
+
+  state = prepared;
+  currentRevision = revision;
+  lastKnownMeta = metadata;
+  setInitializedFlag();
+  storageHealth.warning = results.indexedDB && results.localStorage ? '' : `当前只有一份存储写入成功：${results.errors.join('；')}`;
+  return results;
+}
+
+function readLocalSnapshotList() {
+  const result = readLocalJSON(LS_SNAPSHOTS_KEY);
+  return result.status === 'ok' && Array.isArray(result.value) ? result.value : [];
+}
+
+function writeLocalSnapshotList(items) {
+  localSetJSON(LS_SNAPSHOTS_KEY, items.slice(0, MAX_LOCAL_FALLBACK_SNAPSHOTS));
+}
+
+async function trimSnapshots() {
+  if (db) {
+    try {
+      const items = (await dbGetAllFrom(STORE_SNAPSHOTS)).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      await Promise.all(items.slice(MAX_SNAPSHOTS).map(item => dbDeleteFrom(STORE_SNAPSHOTS, item.id)));
+    } catch {
+      // Snapshot trimming is best effort and never changes current state.
+    }
+  }
+}
+
+async function createSnapshot(reason, sourceState = state) {
+  const prepared = sanitizeImportedState(cloneValue(sourceState));
+  const createdAt = new Date().toISOString();
+  const snapshot = {
+    id: `snapshot_${createdAt}_${uuid()}`,
+    reason: String(reason || 'manual'),
+    createdAt,
+    wordCount: prepared.words.length,
+    logCount: prepared.logs.length,
+    checksum: checksumState(prepared),
+    schemaVersion: SCHEMA_VERSION,
+    appVersion: APP_VERSION_NUMBER,
+    state: cloneValue(prepared),
+  };
+  let stored = false;
+  if (db) {
+    try {
+      await dbPutTo(STORE_SNAPSHOTS, snapshot);
+      stored = true;
+      await trimSnapshots();
+    } catch {
+      // Fall through to local snapshot mirror.
+    }
+  }
+  try {
+    const localItems = readLocalSnapshotList().filter(item => item.id !== snapshot.id);
+    writeLocalSnapshotList([snapshot, ...localItems]);
+    stored = true;
+  } catch {
+    // At least the IDB copy may still exist.
+  }
+  await loadSnapshotSummaries();
+  return stored ? snapshot : null;
+}
+
+async function getAllSnapshots() {
+  const merged = new Map();
+  if (db) {
+    try {
+      (await dbGetAllFrom(STORE_SNAPSHOTS)).forEach(item => merged.set(item.id, item));
+    } catch {
+      // Use local snapshots if IndexedDB is unavailable.
+    }
+  }
+  try {
+    readLocalSnapshotList().forEach(item => merged.set(item.id, item));
+  } catch {
+    // No local fallback.
+  }
+  return [...merged.values()].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+
+async function loadSnapshotSummaries() {
+  const items = await getAllSnapshots();
+  snapshotSummaries = items.map(item => ({
+    id: item.id,
+    reason: item.reason,
+    createdAt: item.createdAt,
+    wordCount: item.wordCount,
+    logCount: item.logCount,
+  }));
+  return snapshotSummaries;
+}
+
+async function getSnapshotById(id) {
+  if (db) {
+    try {
+      const item = await dbGetFrom(STORE_SNAPSHOTS, id);
+      if (item) return item;
+    } catch {
+      // Try local fallback.
+    }
+  }
+  return readLocalSnapshotList().find(item => item.id === id) || null;
+}
+
+function downloadJSONFile(payload, filename) {
+  const text = JSON.stringify(payload, null, 2);
+  const blob = new Blob(['\ufeff' + text], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+
+async function restoreSnapshot(id) {
+  const snapshot = await getSnapshotById(id);
+  if (!snapshot) throw new Error('未找到该快照');
+  const shape = validateRawStateShape(snapshot.state);
+  if (!shape.ok) throw new Error(`快照无效：${shape.error}`);
+  const prepared = sanitizeImportedState(snapshot.state);
+  if (snapshot.checksum && snapshot.checksum !== checksumState(prepared)) throw new Error('快照校验失败');
+  await createSnapshot('restore-before', state);
+  await saveState(prepared, { allowLargeDecrease: true, skipDailySnapshot: true });
+  resetNormalReviewSession();
+  resetWrongBookSession();
+  reviewContext = { type: 'today', sourceDate: null };
+  renderAll();
+}
+
+function setFatalDataError(message, details = {}) {
+  appLocked = true;
+  fatalDataDetails = { message, ...details, occurredAt: new Date().toISOString() };
+}
+
+function renderFatalDataError() {
+  const overlay = document.getElementById('fatalDataOverlay');
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  document.getElementById('fatalDataMessage').textContent = fatalDataDetails?.message || '检测到数据异常。';
+  const snapshotBox = document.getElementById('fatalSnapshotList');
+  snapshotBox.innerHTML = snapshotSummaries.length
+    ? snapshotSummaries.map(item => `<button class="btn snapshot-restore-btn" data-id="${escapeHtml(item.id)}">恢复 ${escapeHtml(new Date(item.createdAt).toLocaleString('zh-CN'))} · ${item.wordCount} 词</button>`).join('')
+    : '<div class="small muted">未找到可用自动快照。</div>';
+}
+
+function bindFatalRecoveryEvents() {
+  document.getElementById('fatalExportDiagnosticBtn')?.addEventListener('click', () => {
+    downloadJSONFile({
+      appVersion: APP_VERSION_NUMBER,
+      schemaVersion: SCHEMA_VERSION,
+      fatal: fatalDataDetails,
+      storageHealth,
+      lastKnownMeta,
+      snapshots: snapshotSummaries,
+    }, `word_recall_diagnostic_${todayStr()}.json`);
+  });
+  document.getElementById('fatalImportInput')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      const raw = parsed?.state && parsed?.metadata ? parsed.state : parsed;
+      const shape = validateRawStateShape(raw);
+      if (!shape.ok) throw new Error(shape.error);
+      const prepared = sanitizeImportedState(raw);
+      await createSnapshot('fatal-import-before', state);
+      await persistPreparedState(prepared, { allowLargeDecrease: true, migratedFrom: 'fatal-backup-import', migrationTime: new Date().toISOString() });
+      location.reload();
+    } catch (error) {
+      document.getElementById('fatalRecoveryStatus').textContent = `恢复失败：${error?.message || error}`;
+    } finally {
+      event.target.value = '';
+    }
+  });
+  document.getElementById('fatalSnapshotList')?.addEventListener('click', async event => {
+    const button = event.target.closest('.snapshot-restore-btn');
+    if (!button) return;
+    try {
+      await restoreSnapshot(button.dataset.id);
+      location.reload();
+    } catch (error) {
+      document.getElementById('fatalRecoveryStatus').textContent = `快照恢复失败：${error?.message || error}`;
+    }
+  });
+}
+
 function getDraftKey(kind) {
   return kind === 'calendar' ? LS_CALENDAR_DRAFT_KEY : LS_TODAY_DRAFT_KEY;
 }
 
 function getDraft(kind) {
-  return localGetJSON(getDraftKey(kind), { word: '', meaning: '', example: '', tags: '' }) || { word: '', meaning: '', example: '', tags: '' };
+  const empty = { word: '', meaning: '', example: '', exampleMeaning: '', tags: '' };
+  const current = localGetJSON(getDraftKey(kind), null);
+  if (current) return { ...empty, ...current };
+  const legacyKeys = kind === 'calendar' ? LEGACY_CALENDAR_DRAFT_KEYS : LEGACY_TODAY_DRAFT_KEYS;
+  for (const key of legacyKeys) {
+    const legacy = localGetJSON(key, null);
+    if (legacy) return { ...empty, ...legacy };
+  }
+  return empty;
 }
 
 function saveDraft(kind, draft) {
@@ -108,6 +551,7 @@ function saveDraft(kind, draft) {
     word: String(draft?.word || ''),
     meaning: String(draft?.meaning || ''),
     example: String(draft?.example || ''),
+    exampleMeaning: String(draft?.exampleMeaning || ''),
     tags: String(draft?.tags || ''),
   });
 }
@@ -132,20 +576,24 @@ function applyDraftToInputs(kind) {
     const wordEl = document.getElementById('calendarWordInput');
     const meaningEl = document.getElementById('calendarMeaningInput');
     const exampleEl = document.getElementById('calendarExampleInput');
+    const exampleMeaningEl = document.getElementById('calendarExampleMeaningInput');
     const tagEl = document.getElementById('calendarTagInput');
     if (wordEl) wordEl.value = draft.word || '';
     if (meaningEl) { meaningEl.value = draft.meaning || ''; autoResizeTextarea(meaningEl); }
     if (exampleEl) exampleEl.value = draft.example || '';
+    if (exampleMeaningEl) exampleMeaningEl.value = draft.exampleMeaning || '';
     if (tagEl) tagEl.value = draft.tags || '';
     return;
   }
   const wordEl = document.getElementById('wordInput');
   const meaningEl = document.getElementById('meaningInput');
   const exampleEl = document.getElementById('exampleInput');
+  const exampleMeaningEl = document.getElementById('exampleMeaningInput');
   const tagEl = document.getElementById('tagInput');
   if (wordEl) wordEl.value = draft.word || '';
   if (meaningEl) { meaningEl.value = draft.meaning || ''; autoResizeTextarea(meaningEl); }
   if (exampleEl) exampleEl.value = draft.example || '';
+  if (exampleMeaningEl) exampleMeaningEl.value = draft.exampleMeaning || '';
   if (tagEl) tagEl.value = draft.tags || '';
 }
 
@@ -155,6 +603,7 @@ function captureDraftFromInputs(kind) {
       word: document.getElementById('calendarWordInput')?.value || '',
       meaning: document.getElementById('calendarMeaningInput')?.value || '',
       example: document.getElementById('calendarExampleInput')?.value || '',
+      exampleMeaning: document.getElementById('calendarExampleMeaningInput')?.value || '',
       tags: document.getElementById('calendarTagInput')?.value || '',
     });
     return;
@@ -163,6 +612,7 @@ function captureDraftFromInputs(kind) {
     word: document.getElementById('wordInput')?.value || '',
     meaning: document.getElementById('meaningInput')?.value || '',
     example: document.getElementById('exampleInput')?.value || '',
+    exampleMeaning: document.getElementById('exampleMeaningInput')?.value || '',
     tags: document.getElementById('tagInput')?.value || '',
   });
 }
@@ -188,9 +638,6 @@ function getDaysInMonth(dateObj) {
   return new Date(dateObj.getFullYear(), dateObj.getMonth() + 1, 0).getDate();
 }
 
-function getBatchDatesForTargetDate(targetDate, intervals) {
-  return [...new Set((intervals || []).map(interval => addDays(targetDate, -interval)))];
-}
 
 function chunk(arr, size) {
   if (!Array.isArray(arr) || arr.length === 0) return [];
@@ -217,6 +664,282 @@ function worseRating(a, b) {
   if (!b) return a;
   return ratingRank(a) >= ratingRank(b) ? a : b;
 }
+
+function capRatingForHint(rating, usedHint) {
+  if (!usedHint) return rating;
+  return ratingRank(rating) < ratingRank('Hard') ? 'Hard' : rating;
+}
+
+function splitMeanings(text) {
+  return String(text || '').split(/[；;\n]+/).map(item => item.trim()).filter(Boolean);
+}
+
+function makeMeaningHint(meaning) {
+  const parts = splitMeanings(meaning);
+  if (!parts.length) return '这个词有中文目标义项，但当前无法生成轻提示。';
+  const cues = parts.map(part => `${part.slice(0, 1)}${part.length > 1 ? '…' : ''}`);
+  return `共 ${parts.length} 个目标义项：${cues.join('；')}`;
+}
+
+function makeEnglishHint(word) {
+  const raw = String(word || '').trim();
+  const letters = [...raw].filter(ch => /[A-Za-z]/.test(ch)).length;
+  let firstShown = false;
+  const masked = [...raw].map(ch => {
+    if (/[A-Za-z]/.test(ch)) {
+      if (!firstShown) {
+        firstShown = true;
+        return ch;
+      }
+      return '＿';
+    }
+    return ch;
+  }).join('');
+  return `${masked}${letters ? `（${letters} 个字母）` : ''}`;
+}
+
+function speakWord(text) {
+  const value = String(text || '').trim();
+  if (!value) return showToast('请先填写英文单词');
+  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+    showToast('当前浏览器不支持语音朗读');
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(value);
+  utterance.lang = state.settings.pronunciationLocale || 'en-US';
+  utterance.rate = 0.9;
+  const voices = window.speechSynthesis.getVoices?.() || [];
+  const exact = voices.find(voice => voice.lang === utterance.lang);
+  const languageMatch = voices.find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()));
+  if (exact || languageMatch) utterance.voice = exact || languageMatch;
+  window.speechSynthesis.speak(utterance);
+}
+
+function maybeAutoSpeak(word, key) {
+  const reviewActive = document.getElementById('review')?.classList.contains('active');
+  const wrongActive = document.getElementById('wrongbook')?.classList.contains('active');
+  if ((!reviewActive && !wrongActive) || !state.settings.autoPronounce || !word || lastAutoSpokenKey === key) return;
+  lastAutoSpokenKey = key;
+  setTimeout(() => speakWord(word), 60);
+}
+
+function firstMeaningGloss(meaning) {
+  return splitMeanings(meaning)[0] || String(meaning || '').trim();
+}
+
+function capitalize(text) {
+  const value = String(text || '');
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+function generateFallbackExample(word, partOfSpeech = '', meaning = '') {
+  const w = String(word || '').trim();
+  const pos = String(partOfSpeech || '').toLowerCase();
+  const gloss = firstMeaningGloss(meaning);
+  if (pos.includes('verb')) return { example: `We need to ${w} this carefully.`, translation: gloss ? `我们需要认真地${gloss}。` : '' };
+  if (pos.includes('adjective')) return { example: `The result was ${w}.`, translation: gloss ? `结果是${gloss}的。` : '' };
+  if (pos.includes('adverb')) return { example: `She spoke ${w}.`, translation: gloss ? `她${gloss}地说。` : '' };
+  if (pos.includes('interjection')) return { example: `${capitalize(w)}!`, translation: gloss ? `${gloss}！` : '' };
+  return { example: `This ${w} is important.`, translation: gloss ? `这个${gloss}很重要。` : '' };
+}
+
+async function fetchDictionaryData(word) {
+  const value = String(word || '').trim();
+  if (!value) throw new Error('empty-word');
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+  let response;
+  try {
+    response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(value)}`, { method: 'GET', signal: controller?.signal });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  if (!response.ok) throw new Error(`dictionary-${response.status}`);
+  const entries = await response.json();
+  let example = '';
+  let partOfSpeech = '';
+  let phonetic = '';
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    phonetic = phonetic || String(entry.phonetic || '') || String((entry.phonetics || []).find(item => item.text)?.text || '');
+    for (const meaning of entry.meanings || []) {
+      partOfSpeech = partOfSpeech || String(meaning.partOfSpeech || '');
+      for (const definition of meaning.definitions || []) {
+        if (definition.example) {
+          example = String(definition.example);
+          return { example, partOfSpeech, phonetic };
+        }
+      }
+    }
+  }
+  return { example, partOfSpeech, phonetic };
+}
+
+async function autoFillExample({ wordInputId, meaningInputId, exampleInputId, exampleMeaningInputId, statusId }) {
+  const wordEl = document.getElementById(wordInputId);
+  const meaningEl = document.getElementById(meaningInputId);
+  const exampleEl = document.getElementById(exampleInputId);
+  const translationEl = document.getElementById(exampleMeaningInputId);
+  const statusEl = document.getElementById(statusId);
+  const word = wordEl?.value.trim() || '';
+  if (!word) return showToast('请先填写英文单词');
+  if (exampleEl?.value.trim() && !confirm('当前已有例句，确定覆盖吗？')) return;
+  if (statusEl) statusEl.textContent = '正在查询…';
+  try {
+    const data = await fetchDictionaryData(word);
+    if (data.example) {
+      exampleEl.value = data.example;
+      if (statusEl) statusEl.textContent = '已写入词典例句；中文请自行确认。';
+      if (wordInputId === 'wordInput') captureDraftFromInputs('today');
+      if (wordInputId === 'calendarWordInput') captureDraftFromInputs('calendar');
+      return;
+    }
+    const fallback = generateFallbackExample(word, data.partOfSpeech, meaningEl?.value || '');
+    exampleEl.value = fallback.example;
+    if (translationEl && !translationEl.value.trim()) translationEl.value = fallback.translation;
+    if (statusEl) statusEl.textContent = '词典未返回例句，已写入本地简单例句。';
+  } catch {
+    const fallback = generateFallbackExample(word, '', meaningEl?.value || '');
+    exampleEl.value = fallback.example;
+    if (translationEl && !translationEl.value.trim()) translationEl.value = fallback.translation;
+    if (statusEl) statusEl.textContent = '在线查询失败，已写入可编辑的本地简单例句。';
+  }
+  if (wordInputId === 'wordInput') captureDraftFromInputs('today');
+  if (wordInputId === 'calendarWordInput') captureDraftFromInputs('calendar');
+}
+
+function getWrongEntry(wordId) {
+  return state.wrongBook.find(item => item.wordId === wordId && item.active !== false) || null;
+}
+
+function ensureWrongEntry(wordId, source = 'recent') {
+  let entry = getWrongEntry(wordId);
+  if (!entry) {
+    entry = {
+      wordId,
+      errorCount: Math.max(0, Number(state.words.find(word => word.id === wordId)?.totalErrorCount || 0)),
+      weakCount: 0,
+      active: true,
+      source,
+      nextReviewDate: todayStr(),
+      lastReviewDate: '',
+      lastResult: '',
+      recoveryStage: 0,
+      masteryStreak: 0,
+      lastErrorDate: '',
+      lastWeakDate: '',
+      firstScheduledAt: todayStr(),
+    };
+    state.wrongBook.push(entry);
+  }
+  entry.active = true;
+  if (source === 'recent') entry.source = 'recent';
+  return entry;
+}
+
+function recordWeakOrError(wordId, rating, usedHint = false) {
+  const finalRating = capRatingForHint(rating, usedHint);
+  if (!['Hard', 'Again'].includes(finalRating)) return;
+  const word = state.words.find(item => item.id === wordId);
+  if (!word) return;
+  const entry = ensureWrongEntry(wordId, 'recent');
+  entry.lastResult = finalRating;
+  entry.masteryStreak = 0;
+  entry.recoveryStage = 0;
+  if (finalRating === 'Again') {
+    if (entry.lastErrorDate !== todayStr()) {
+      entry.errorCount = Math.max(1, Number(entry.errorCount || 0) + 1);
+      word.totalErrorCount = Math.max(0, Number(word.totalErrorCount || 0)) + 1;
+      entry.lastErrorDate = todayStr();
+    }
+    entry.nextReviewDate = addDays(todayStr(), 1);
+  } else {
+    if (entry.lastWeakDate !== todayStr()) {
+      entry.weakCount = Math.max(0, Number(entry.weakCount || 0)) + 1;
+      word.weakCount = Math.max(0, Number(word.weakCount || 0)) + 1;
+      if (usedHint) word.hintUseCount = Math.max(0, Number(word.hintUseCount || 0)) + 1;
+      entry.lastWeakDate = todayStr();
+    }
+    entry.nextReviewDate = addDays(todayStr(), usedHint ? 1 : RECOVERY_DAYS.Hard);
+  }
+}
+
+function settleRecoveryReview(wordId, rating, usedHint = false) {
+  const finalRating = capRatingForHint(rating, usedHint);
+  const entry = ensureWrongEntry(wordId, 'recent');
+  const word = state.words.find(item => item.id === wordId);
+  entry.lastReviewDate = todayStr();
+  entry.lastResult = finalRating;
+  if (['Hard', 'Again'].includes(finalRating)) {
+    recordWeakOrError(wordId, finalRating, usedHint);
+    return finalRating;
+  }
+  if (entry.lastErrorDate === todayStr()) {
+    entry.nextReviewDate = addDays(todayStr(), 1);
+    return finalRating;
+  }
+  entry.masteryStreak = Math.max(0, Number(entry.masteryStreak || 0)) + 1;
+  entry.recoveryStage = Math.max(0, Number(entry.recoveryStage || 0)) + (finalRating === 'Easy' ? 2 : 1);
+  if (entry.masteryStreak >= 3) {
+    state.wrongBook = state.wrongBook.filter(item => item.wordId !== wordId);
+    if (word) {
+      const resumeDays = finalRating === 'Easy' ? RECOVERY_DAYS.Easy : RECOVERY_DAYS.Good;
+      if (!word.nextReviewDate || word.nextReviewDate <= todayStr()) word.nextReviewDate = addDays(todayStr(), resumeDays);
+      word.lastReviewDate = todayStr();
+      word.lastFinalRating = finalRating;
+      word.catchupPending = false;
+    }
+  } else {
+    const nextDays = entry.masteryStreak >= 2 ? RECOVERY_DAYS.Easy : RECOVERY_DAYS[finalRating];
+    entry.nextReviewDate = addDays(todayStr(), nextDays);
+  }
+  if (word && usedHint) word.hintUseCount = Math.max(0, Number(word.hintUseCount || 0)) + 1;
+  return finalRating;
+}
+
+function advanceNormalSchedule(word, rating, usedHint = false) {
+  const finalRating = capRatingForHint(rating, usedHint);
+  const intervals = state.settings.intervals;
+  const lastIndex = Math.max(0, intervals.length - 1);
+  const current = Math.min(Math.max(0, Number(word.scheduleStage || 0)), lastIndex);
+  const step = finalRating === 'Easy' ? 2 : 1;
+  const next = Math.min(current + step, lastIndex);
+  const gap = next > current ? Math.max(1, intervals[next] - intervals[current]) : Math.max(1, intervals[lastIndex] || 180);
+  word.scheduleStage = next;
+  word.stageIndex = next;
+  word.nextReviewDate = addDays(todayStr(), gap);
+  word.lastReviewDate = todayStr();
+  word.lastFinalRating = finalRating;
+  word.catchupPending = false;
+  const reviewed = new Set(word.reviewedOnDates || []);
+  reviewed.add(todayStr());
+  word.reviewedOnDates = [...reviewed];
+  if (usedHint) word.hintUseCount = Math.max(0, Number(word.hintUseCount || 0)) + 1;
+}
+
+function reschedulePendingLegacyBacklog() {
+  const wordMap = new Map(state.words.map(word => [word.id, word]));
+  const pending = state.wrongBook.filter(item => item.active !== false && item.source === 'legacyBacklog' && !item.lastReviewDate);
+  pending.sort((a, b) => {
+    const countDiff = (Number(b.errorCount) || 0) - (Number(a.errorCount) || 0);
+    if (countDiff !== 0) return countDiff;
+    const wa = wordMap.get(a.wordId) || {};
+    const wb = wordMap.get(b.wordId) || {};
+    return String(wa.createdAt || '').localeCompare(String(wb.createdAt || '')) || String(wa.word || '').localeCompare(String(wb.word || ''));
+  });
+  pending.forEach((item, index) => {
+    item.nextReviewDate = addDays(todayStr(), Math.floor(index / state.settings.backlogDailyLimit));
+  });
+}
+
+function reschedulePendingNormalCatchup() {
+  const pending = state.words.filter(word => word.catchupPending && word.nextReviewDate >= todayStr());
+  pending.sort((a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || '')));
+  pending.forEach((word, index) => {
+    word.nextReviewDate = addDays(todayStr(), Math.floor(index / state.settings.longTermDailyLimit));
+  });
+}
+
 
 function normalizeEnglish(text) {
   return String(text || '')
@@ -274,23 +997,121 @@ function looksLikeMojibake(text) {
   return /�/.test(s) || /(?:Ã.|Â.|å.|ä.|ç.|æ.|é.|è.|ö.|ü)/.test(s);
 }
 
+function ensureLongIntervals(values) {
+  const cleaned = [...new Set((values || []).map(Number).filter(n => Number.isFinite(n) && n >= 0))].sort((a, b) => a - b);
+  if (!cleaned.includes(0)) cleaned.unshift(0);
+  if ((cleaned.at(-1) ?? 0) <= 30) {
+    [60, 90, 180].forEach(day => {
+      if (!cleaned.includes(day)) cleaned.push(day);
+    });
+  }
+  return [...new Set(cleaned)].sort((a, b) => a - b);
+}
+
+function normalizeSettings(rawSettings = {}) {
+  const intervals = ensureLongIntervals(Array.isArray(rawSettings.intervals) && rawSettings.intervals.length ? rawSettings.intervals : DEFAULT_INTERVALS);
+  const dailyQuota = [5, 10].includes(Number(rawSettings.dailyQuota)) ? Number(rawSettings.dailyQuota) : 5;
+  const backlogDailyLimit = [5, 8, 10].includes(Number(rawSettings.backlogDailyLimit)) ? Number(rawSettings.backlogDailyLimit) : 8;
+  const longTermDailyLimit = [3, 5, 8].includes(Number(rawSettings.longTermDailyLimit)) ? Number(rawSettings.longTermDailyLimit) : 5;
+  const pronunciationLocale = ['en-US', 'en-GB'].includes(rawSettings.pronunciationLocale) ? rawSettings.pronunciationLocale : 'en-US';
+  return {
+    dailyQuota,
+    intervals,
+    batchSize: dailyQuota,
+    backlogDailyLimit,
+    longTermDailyLimit,
+    pronunciationLocale,
+    autoPronounce: Boolean(rawSettings.autoPronounce),
+  };
+}
+
+function computeLegacyNextSchedule(word, intervals) {
+  const reviewed = new Set(Array.isArray(word.reviewedOnDates) ? word.reviewedOnDates : []);
+  let nextIndex = 0;
+  for (let i = 0; i < intervals.length; i += 1) {
+    const dueDate = addDays(word.createdAt || todayStr(), intervals[i]);
+    if (reviewed.has(dueDate)) nextIndex = Math.min(i + 1, intervals.length - 1);
+    else break;
+  }
+  const dueDate = addDays(word.createdAt || todayStr(), intervals[nextIndex] || 0);
+  return { nextIndex, dueDate };
+}
+
+function initializeMissingNormalSchedules(words, settings) {
+  const overdue = [];
+  words.forEach(word => {
+    if (word.nextReviewDate) return;
+    const legacy = computeLegacyNextSchedule(word, settings.intervals);
+    word.scheduleStage = legacy.nextIndex;
+    word.stageIndex = legacy.nextIndex;
+    if (legacy.dueDate >= todayStr()) {
+      word.nextReviewDate = legacy.dueDate;
+    } else {
+      overdue.push({ word, dueDate: legacy.dueDate });
+    }
+  });
+  overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || String(a.word.createdAt || '').localeCompare(String(b.word.createdAt || '')) || String(a.word.word || '').localeCompare(String(b.word.word || '')));
+  overdue.forEach((item, index) => {
+    item.word.nextReviewDate = addDays(todayStr(), Math.floor(index / settings.longTermDailyLimit));
+    item.word.scheduleMigratedAt = todayStr();
+    item.word.catchupPending = true;
+  });
+}
+
+function initializeMissingBacklogSchedules(wrongBook, words, settings) {
+  const wordMap = new Map(words.map(word => [word.id, word]));
+  const missing = wrongBook.filter(item => item.active !== false && !item.nextReviewDate);
+  missing.sort((a, b) => {
+    const countDiff = (Number(b.errorCount) || 0) - (Number(a.errorCount) || 0);
+    if (countDiff !== 0) return countDiff;
+    const wa = wordMap.get(a.wordId) || {};
+    const wb = wordMap.get(b.wordId) || {};
+    const dateDiff = String(wa.createdAt || '').localeCompare(String(wb.createdAt || ''));
+    if (dateDiff !== 0) return dateDiff;
+    return String(wa.word || '').localeCompare(String(wb.word || ''));
+  });
+  missing.forEach((item, index) => {
+    item.source = item.source || 'legacyBacklog';
+    item.nextReviewDate = addDays(todayStr(), Math.floor(index / settings.backlogDailyLimit));
+    item.firstScheduledAt = todayStr();
+  });
+}
+
 function sanitizeImportedState(parsed) {
   const raw = parsed || {};
-  const rawSettings = raw.settings || {};
-  const intervals = Array.isArray(rawSettings.intervals) && rawSettings.intervals.length
-    ? rawSettings.intervals.map(Number).filter(n => Number.isFinite(n) && n >= 0).sort((a, b) => a - b)
-    : [0, 1, 3, 7, 14, 30];
-  const dailyQuota = [5, 10].includes(Number(rawSettings.dailyQuota)) ? Number(rawSettings.dailyQuota) : 10;
-  const words = Array.isArray(raw.words) ? raw.words.map(word => normalizeWord({
-    ...word,
-    example: String(word?.example || ''),
-    tags: Array.isArray(word?.tags) ? word.tags.map(String) : [],
-    stageIndex: remapStageIndex([0, 1, 3, 7, 14, 30], intervals, Number(word?.stageIndex || 0)),
-  })) : [];
+  const settings = normalizeSettings(raw.settings || {});
+  const words = Array.isArray(raw.words) ? raw.words.map(word => normalizeWord(word)) : [];
   const ids = new Set(words.map(word => word.id));
-  const wrongBook = Array.isArray(raw.wrongBook)
-    ? raw.wrongBook.filter(item => item && ids.has(String(item.wordId))).map(item => ({ wordId: String(item.wordId), errorCount: Math.max(1, Number(item.errorCount || 1)) }))
-    : [];
+  const seen = new Map();
+  if (Array.isArray(raw.wrongBook)) {
+    raw.wrongBook.forEach(item => {
+      if (!item || !ids.has(String(item.wordId))) return;
+      const wordId = String(item.wordId);
+      const existing = seen.get(wordId);
+      const normalized = {
+        wordId,
+        errorCount: item.errorCount != null || item.totalErrorCount != null ? Math.max(0, Number(item.errorCount ?? item.totalErrorCount ?? 0)) : 1,
+        weakCount: Math.max(0, Number(item.weakCount || 0)),
+        active: item.active !== false,
+        source: String(item.source || ''),
+        nextReviewDate: item.nextReviewDate ? String(item.nextReviewDate) : '',
+        lastReviewDate: item.lastReviewDate ? String(item.lastReviewDate) : '',
+        lastResult: item.lastResult ? String(item.lastResult) : '',
+        recoveryStage: Math.max(0, Number(item.recoveryStage || 0)),
+        masteryStreak: Math.max(0, Number(item.masteryStreak || 0)),
+        lastErrorDate: item.lastErrorDate ? String(item.lastErrorDate) : '',
+        lastWeakDate: item.lastWeakDate ? String(item.lastWeakDate) : '',
+        firstScheduledAt: item.firstScheduledAt ? String(item.firstScheduledAt) : '',
+      };
+      if (!existing || normalized.errorCount > existing.errorCount) seen.set(wordId, normalized);
+    });
+  }
+  const wrongBook = [...seen.values()];
+  const wordMapForCounts = new Map(words.map(word => [word.id, word]));
+  wrongBook.forEach(item => {
+    const word = wordMapForCounts.get(item.wordId);
+    if (word) word.totalErrorCount = Math.max(Number(word.totalErrorCount || 0), Number(item.errorCount || 0));
+  });
   const logs = Array.isArray(raw.logs)
     ? raw.logs.map((log, i) => ({
         id: String(log?.id || `log_${i}_${Date.now()}`),
@@ -301,31 +1122,42 @@ function sanitizeImportedState(parsed) {
         rating: String(log?.rating || ''),
         addedToWrongBook: Boolean(log?.addedToWrongBook),
         inputValue: String(log?.inputValue || ''),
+        usedHint: Boolean(log?.usedHint),
+        forcedAgain: Boolean(log?.forcedAgain),
       }))
     : [];
-  return { settings: { dailyQuota, intervals, batchSize: dailyQuota }, words, wrongBook, logs };
+  initializeMissingNormalSchedules(words, settings);
+  initializeMissingBacklogSchedules(wrongBook, words, settings);
+  return { settings, words, wrongBook, logs };
 }
 
 function getBatchSize() {
   return Number(state.settings?.dailyQuota) || 10;
 }
 
-function normalizeWord(word) {
-  return {
-    id: uuid(),
-    word: '',
-    meaning: '',
-    example: '',
-    tags: [],
-    createdAt: todayStr(),
-    stageIndex: 0,
-    reviewedOnDates: [],
-    lastReviewDate: null,
-    lastFinalRating: null,
-    ...word,
-    tags: Array.isArray(word.tags) ? word.tags : [],
-    reviewedOnDates: Array.isArray(word.reviewedOnDates) ? word.reviewedOnDates : [],
+function normalizeWord(word = {}) {
+  const normalized = {
+    id: String(word.id || uuid()),
+    word: String(word.word || ''),
+    meaning: String(word.meaning || ''),
+    example: String(word.example || ''),
+    exampleMeaning: String(word.exampleMeaning || word.exampleTranslation || ''),
+    phonetic: String(word.phonetic || ''),
+    tags: Array.isArray(word.tags) ? word.tags.map(String) : [],
+    createdAt: String(word.createdAt || todayStr()),
+    stageIndex: Math.max(0, Number(word.stageIndex || word.scheduleStage || 0)),
+    scheduleStage: Math.max(0, Number(word.scheduleStage ?? word.stageIndex ?? 0)),
+    nextReviewDate: word.nextReviewDate ? String(word.nextReviewDate) : '',
+    reviewedOnDates: Array.isArray(word.reviewedOnDates) ? word.reviewedOnDates.map(String) : [],
+    lastReviewDate: word.lastReviewDate ? String(word.lastReviewDate) : null,
+    lastFinalRating: word.lastFinalRating ? String(word.lastFinalRating) : null,
+    totalErrorCount: Math.max(0, Number(word.totalErrorCount || 0)),
+    weakCount: Math.max(0, Number(word.weakCount || 0)),
+    hintUseCount: Math.max(0, Number(word.hintUseCount || 0)),
+    scheduleMigratedAt: word.scheduleMigratedAt ? String(word.scheduleMigratedAt) : '',
+    catchupPending: Boolean(word.catchupPending),
   };
+  return normalized;
 }
 
 function getYearOptions() {
@@ -337,42 +1169,54 @@ function getYearOptions() {
 }
 
 function getWrongBookMap() {
-  return new Map((state.wrongBook || []).map(item => [item.wordId, item.errorCount]));
+  return new Map((state.wrongBook || []).filter(item => item.active !== false).map(item => [item.wordId, item.errorCount]));
 }
 
 function getWrongBookIds() {
-  return new Set((state.wrongBook || []).map(item => item.wordId));
+  return new Set((state.wrongBook || []).filter(item => item.active !== false).map(item => item.wordId));
 }
 
-function getWrongBookItems() {
+function getWrongBookItems(options = {}) {
+  const dueOnly = Boolean(options.dueOnly);
+  const wordMap = new Map(state.words.map(word => [word.id, word]));
   return (state.wrongBook || [])
+    .filter(item => item.active !== false)
+    .filter(item => !dueOnly || !item.nextReviewDate || item.nextReviewDate <= todayStr())
     .map(item => {
-      const word = state.words.find(w => w.id === item.wordId);
-      return word ? { ...word, errorCount: item.errorCount } : null;
+      const word = wordMap.get(item.wordId);
+      return word ? { ...word, ...item, id: word.id, errorCount: item.errorCount } : null;
     })
     .filter(Boolean)
     .sort((a, b) => {
+      const sourceDiff = (a.source === 'recent' ? 0 : 1) - (b.source === 'recent' ? 0 : 1);
+      if (dueOnly && sourceDiff !== 0) return sourceDiff;
+      const dateDiff = String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || ''));
+      if (dateDiff !== 0) return dateDiff;
+      if (sourceDiff !== 0) return sourceDiff;
       const countDiff = (Number(b.errorCount) || 0) - (Number(a.errorCount) || 0);
       if (countDiff !== 0) return countDiff;
-      const dateDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
-      if (dateDiff !== 0) return dateDiff;
+      const createdDiff = String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+      if (createdDiff !== 0) return createdDiff;
       return String(a.word || '').localeCompare(String(b.word || ''));
     });
 }
 
 function getTodayDueWords(targetDate = todayStr()) {
-  const batchDates = getBatchDatesForTargetDate(targetDate, state.settings.intervals);
+  const activeRecoveryIds = getWrongBookIds();
   return state.words
-    .filter(word => batchDates.includes(word.createdAt) && !(word.reviewedOnDates || []).includes(targetDate))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.word.localeCompare(b.word));
+    .filter(word => !activeRecoveryIds.has(word.id))
+    .filter(word => word.nextReviewDate && word.nextReviewDate <= targetDate && !(word.reviewedOnDates || []).includes(targetDate))
+    .sort((a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || '')));
 }
 
 function getBatchSummary(targetDate = todayStr()) {
-  return state.settings.intervals.map(interval => {
-    const batchDate = addDays(targetDate, -interval);
-    const count = state.words.filter(word => word.createdAt === batchDate && !(word.reviewedOnDates || []).includes(targetDate)).length;
-    return { interval, batchDate, count };
+  const counts = new Map();
+  getTodayDueWords(targetDate).forEach(word => {
+    const stage = Math.min(Number(word.scheduleStage || 0), state.settings.intervals.length - 1);
+    const interval = state.settings.intervals[stage] ?? state.settings.intervals.at(-1) ?? 0;
+    counts.set(interval, (counts.get(interval) || 0) + 1);
   });
+  return state.settings.intervals.map(interval => ({ interval, count: counts.get(interval) || 0 })).filter(item => item.count > 0);
 }
 
 function escapeHtml(str) {
@@ -385,41 +1229,193 @@ function escapeHtml(str) {
 }
 
 async function loadState() {
-  const saved = localGetJSON(LS_STATE_KEY, null);
-  if (saved) {
-    state = sanitizeImportedState(saved);
-    return;
+  const diagnostics = { local: {}, indexedDB: {}, legacy: [] };
+  const candidates = [];
+  let idbMeta = null;
+
+  const localMetaResult = readLocalJSON(LS_META_KEY);
+  diagnostics.local.metaStatus = localMetaResult.status;
+  const localMeta = localMetaResult.status === 'ok' ? localMetaResult.value : null;
+
+  const currentLocalResult = readLocalJSON(LS_STATE_KEY);
+  diagnostics.local.currentStatus = currentLocalResult.status;
+  if (currentLocalResult.status === 'ok') {
+    const candidate = normalizeStoredCandidate(currentLocalResult.value, 'local-current', localMeta);
+    diagnostics.local.currentValidation = candidate.ok ? 'ok' : candidate.error;
+    if (candidate.ok) candidates.push(candidate);
+  } else if (currentLocalResult.status === 'corrupt') {
+    diagnostics.local.corruptRawLength = currentLocalResult.raw?.length || 0;
+  }
+
+  if (db) {
+    try {
+      idbMeta = await dbGetFrom(STORE_META, META_KEY) || null;
+      diagnostics.indexedDB.metaStatus = idbMeta ? 'ok' : 'missing';
+    } catch (error) {
+      diagnostics.indexedDB.metaStatus = 'read_error';
+      diagnostics.indexedDB.metaError = error?.message || String(error);
+    }
+    try {
+      const idbCurrent = await dbGetFrom(STORE_CURRENT, CURRENT_STATE_KEY);
+      diagnostics.indexedDB.currentStatus = idbCurrent ? 'ok' : 'missing';
+      if (idbCurrent) {
+        const candidate = normalizeStoredCandidate(idbCurrent, 'indexeddb-current', idbMeta);
+        diagnostics.indexedDB.currentValidation = candidate.ok ? 'ok' : candidate.error;
+        if (candidate.ok) candidates.push(candidate);
+      }
+    } catch (error) {
+      diagnostics.indexedDB.currentStatus = 'read_error';
+      diagnostics.indexedDB.currentError = error?.message || String(error);
+    }
+  } else {
+    diagnostics.indexedDB.openStatus = 'error';
+    diagnostics.indexedDB.openError = dbOpenError?.message || 'IndexedDB 不可用';
   }
 
   for (const legacyKey of LEGACY_LS_STATE_KEYS) {
-    const legacySaved = localGetJSON(legacyKey, null);
-    if (legacySaved) {
-      state = sanitizeImportedState(legacySaved);
-      localSetJSON(LS_STATE_KEY, state);
-      return;
+    const result = readLocalJSON(legacyKey);
+    diagnostics.legacy.push({ key: legacyKey, status: result.status });
+    if (result.status === 'ok') {
+      const candidate = normalizeStoredCandidate(result.value, `legacy-local:${legacyKey}`);
+      if (candidate.ok) candidates.push(candidate);
     }
   }
 
-  try {
-    db = await openDB();
-    const legacy = await dbGet(APP_STATE_KEY);
-    if (legacy) {
-      state = sanitizeImportedState(legacy);
-      localSetJSON(LS_STATE_KEY, state);
-      return;
+  if (db) {
+    try {
+      const legacyIdb = await dbGetFrom(STORE_APP, APP_STATE_KEY);
+      diagnostics.indexedDB.legacyStatus = legacyIdb ? 'ok' : 'missing';
+      if (legacyIdb) {
+        const candidate = normalizeStoredCandidate(legacyIdb, 'legacy-indexeddb');
+        if (candidate.ok) candidates.push(candidate);
+      }
+    } catch (error) {
+      diagnostics.indexedDB.legacyStatus = 'read_error';
+      diagnostics.indexedDB.legacyError = error?.message || String(error);
     }
-  } catch (error) {
-    console.warn('Legacy IndexedDB migration skipped:', error);
   }
 
-  state = structuredClone(defaultState);
-  localSetJSON(LS_STATE_KEY, state);
+  const initializedBefore = getInitializedFlag() || Boolean(localMeta?.initialized) || Boolean(idbMeta?.initialized);
+  const currentHasError = ['corrupt', 'read_error'].includes(currentLocalResult.status)
+    || diagnostics.indexedDB.currentStatus === 'read_error'
+    || diagnostics.local.currentValidation && diagnostics.local.currentValidation !== 'ok'
+    || diagnostics.indexedDB.currentValidation && diagnostics.indexedDB.currentValidation !== 'ok';
+
+  if (!candidates.length) {
+    if (!initializedBefore && !currentHasError) {
+      const fresh = sanitizeImportedState(cloneValue(defaultState));
+      await persistPreparedState(fresh, { allowLargeDecrease: true, revision: 1, skipDailySnapshot: true });
+      await createSnapshot('first-use', fresh);
+      return true;
+    }
+    setFatalDataError('没有找到可验证的词库状态。程序已停止初始化，未写入空数据库。', { diagnostics });
+    await loadSnapshotSummaries();
+    return false;
+  }
+
+  candidates.sort(compareCandidates);
+  const selected = candidates[0];
+  const knownMetas = [localMeta, idbMeta, ...candidates.map(item => item.metadata)].filter(Boolean).sort((a, b) => Number(b.revision || 0) - Number(a.revision || 0));
+  const strongestMeta = knownMetas[0] || selected.metadata;
+  const selectedWordCount = selected.state.words.length;
+  const knownWordCount = Math.max(0, Number(strongestMeta.lastKnownWordCount || 0));
+  const selectedLogCount = selected.state.logs.length;
+  const knownLogCount = Math.max(0, Number(strongestMeta.lastKnownLogCount || 0));
+  const suspiciousEmpty = knownWordCount > 0 && selectedWordCount === 0;
+  const suspiciousShrink = knownWordCount >= 50 && knownWordCount - selectedWordCount >= 20 && selectedWordCount < knownWordCount * 0.5;
+  const suspiciousLogShrink = knownLogCount >= 200 && knownLogCount - selectedLogCount >= 100 && selectedLogCount < knownLogCount * 0.5;
+  if (suspiciousEmpty || suspiciousShrink || suspiciousLogShrink) {
+    setFatalDataError(`检测到异常数据缩减：上次已知 ${knownWordCount} 个词、${knownLogCount} 条记录；当前候选只有 ${selectedWordCount} 个词、${selectedLogCount} 条记录。未覆盖任何存储。`, { diagnostics, selectedSource: selected.source });
+    await loadSnapshotSummaries();
+    return false;
+  }
+
+  state = selected.state;
+  currentRevision = Number(selected.metadata.revision || 0);
+  lastKnownMeta = { ...selected.metadata, ...strongestMeta };
+  setInitializedFlag();
+
+  const isMigration = selected.source.startsWith('legacy-');
+  if (isMigration) {
+    await createSnapshot(`migration-before:${selected.source}`, state);
+    await persistPreparedState(state, {
+      allowLargeDecrease: true,
+      migratedFrom: selected.source,
+      migrationTime: new Date().toISOString(),
+    });
+  } else {
+    storageHealth.localStorage = currentLocalResult.status === 'ok' ? 'ok' : 'error';
+    storageHealth.indexedDB = diagnostics.indexedDB.currentStatus === 'ok' ? 'ok' : 'error';
+    storageHealth.warning = storageHealth.localStorage === 'ok' && storageHealth.indexedDB === 'ok'
+      ? ''
+      : '当前仅从一份有效存储加载。下次成功保存会尝试修复镜像。';
+  }
+  await loadSnapshotSummaries();
+  return true;
 }
 
-async function saveState(nextState = state) {
-  const prepared = sanitizeImportedState(nextState);
-  localSetJSON(LS_STATE_KEY, prepared);
-  state = prepared;
+async function saveState(nextState = state, options = {}) {
+  const immutableInput = cloneValue(nextState);
+  const task = async () => {
+    const prepared = sanitizeImportedState(immutableInput);
+    if (!options.skipDailySnapshot && lastKnownMeta?.lastDailySnapshotDate !== todayStr()) {
+      await createSnapshot('daily-first-save', state);
+      options = { ...options, lastDailySnapshotDate: todayStr() };
+    }
+    if (options.snapshotReason) await createSnapshot(options.snapshotReason, state);
+    return persistPreparedState(prepared, options);
+  };
+  saveQueue = saveQueue.catch(() => undefined).then(task);
+  return saveQueue;
+}
+
+
+function setReviewControlsDisabled(disabled) {
+  const selectors = [
+    '#hintBtn', '#showAnswerBtn', '#giveUpBtn', '#skipBtn', '#reviewSpeakBtn',
+    '#ratingWrap button', '#wrongbookReviewBox button', '#wrongbookReviewBox input',
+  ];
+  document.querySelectorAll(selectors.join(',')).forEach(element => {
+    element.disabled = Boolean(disabled);
+  });
+}
+
+async function runReviewSubmission(kind, operation) {
+  if (reviewSubmitting || appLocked) return;
+  reviewSubmitting = true;
+  const beforeState = cloneValue(state);
+  const beforeNormal = reviewSession ? cloneValue(reviewSession) : null;
+  const beforeWrong = wrongBookSession ? cloneValue(wrongBookSession) : null;
+  setReviewControlsDisabled(true);
+  showToast('处理中…');
+  try {
+    await operation();
+    await saveState();
+    if (kind === 'normal') {
+      resetWrongBookSession();
+      renderReview();
+    } else {
+      renderWrongBook();
+    }
+    renderDashboard();
+  } catch (error) {
+    state = beforeState;
+    reviewSession = beforeNormal;
+    wrongBookSession = beforeWrong;
+    showToast(`保存失败：${error?.message || error}`);
+    if (appLocked) {
+      setFatalDataError('评分保存失败，且两份本地存储均不可用。程序已锁定，避免继续产生未保存操作。', { error: error?.message || String(error) });
+      await loadSnapshotSummaries();
+      renderFatalDataError();
+    } else if (kind === 'normal') {
+      renderReview();
+    } else {
+      renderWrongBook();
+    }
+  } finally {
+    reviewSubmitting = false;
+    setReviewControlsDisabled(false);
+  }
 }
 
 
@@ -462,11 +1458,13 @@ function startNormalReviewSession() {
     autoAgainReady: false,
     currentPoolIds: baseBatches[0] || [],
     remedialRound: 0,
+    usedHint: false,
+    forcedAgain: false,
   };
 }
 
-function startWrongBookSession() {
-  const queue = getWrongBookItems();
+function startWrongBookSession(queueOverride = null, remedialRound = 0) {
+  const queue = queueOverride || getWrongBookItems({ dueOnly: true });
   wrongBookSession = {
     type: 'wrongbook',
     queueIds: queue.map(w => w.id),
@@ -482,6 +1480,10 @@ function startWrongBookSession() {
     batchOrders: {},
     roundRatings: {},
     autoAgainReady: false,
+    usedHint: false,
+    forcedAgain: false,
+    remedialIds: [],
+    remedialRound,
   };
 }
 
@@ -491,7 +1493,7 @@ function ensureNormalReviewSession() {
     startNormalReviewSession();
     return;
   }
-  if (reviewSession.completed && buildNormalQueue().length > 0) {
+  if (reviewSession.completed && reviewContext.type === 'today' && buildNormalQueue().length > 0) {
     startNormalReviewSession();
   }
 }
@@ -501,7 +1503,7 @@ function ensureWrongBookSession() {
     startWrongBookSession();
     return;
   }
-  if ((wrongBookSession.completed || wrongBookSession.roundCompleted) && getWrongBookItems().length === 0) {
+  if ((wrongBookSession.completed || wrongBookSession.roundCompleted) && getWrongBookItems({ dueOnly: true }).length === 0) {
     startWrongBookSession();
   }
 }
@@ -510,11 +1512,12 @@ function getSessionBatch(session) {
   if (session.type === 'wrongbook') {
     const queue = session.queueIds.map(id => {
       const word = state.words.find(w => w.id === id);
-      return word ? { ...word, errorCount: getWrongBookMap().get(id) ?? 1 } : null;
+      const entry = state.wrongBook.find(item => item.wordId === id);
+      return word ? { ...word, ...(entry || {}), id: word.id, errorCount: entry?.errorCount ?? word.totalErrorCount ?? 1 } : null;
     }).filter(Boolean);
     const batches = chunk(queue, session.batchSize);
     const baseBatch = batches[session.batchIndex] || [];
-    const orderKey = `${session.batchIndex}`;
+    const orderKey = `${session.remedialRound || 0}_${session.batchIndex}`;
     session.batchOrders = session.batchOrders || {};
     if (!session.batchOrders[orderKey]) {
       session.batchOrders[orderKey] = shuffleArray(baseBatch.map(word => word.id));
@@ -539,18 +1542,28 @@ function getSessionBatch(session) {
 function renderDashboard() {
   const today = todayStr();
   const dueWords = getTodayDueWords(today);
+  const dueRecovery = getWrongBookItems({ dueOnly: true });
+  const activeWrong = getWrongBookItems();
   const newCount = state.words.filter(word => word.createdAt === today).length;
   const batchSummary = getBatchSummary(today);
+  const recentDue = dueRecovery.filter(item => item.source === 'recent').length;
+  const backlogDue = dueRecovery.filter(item => item.source !== 'recent').length;
+  const futureBacklog = activeWrong.filter(item => item.source === 'legacyBacklog' && item.nextReviewDate > today).length;
+
   document.getElementById('todayDueCount').textContent = dueWords.length;
+  document.getElementById('todayRecoveryCount').textContent = dueRecovery.length;
   document.getElementById('todayNewQuota').textContent = state.settings.dailyQuota;
-  document.getElementById('wrongWordCount').textContent = state.wrongBook.length;
+  document.getElementById('wrongWordCount').textContent = activeWrong.length;
   document.getElementById('totalWordCount').textContent = state.words.length;
   document.getElementById('todayPlan').innerHTML = `
-    <p>今天建议先完成 <strong>${dueWords.length}</strong> 个命中间隔日期的待复习单词。</p>
-    <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。</p>
-    <p>${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个新词。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
+    <p>先完成薄弱词恢复 <strong>${dueRecovery.length}</strong> 个（近期 Hard / Again：${recentDue}；历史积压释放：${backlogDue}）。</p>
+    <p>再完成正常到期复习 <strong>${dueWords.length}</strong> 个。</p>
+    <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
+    ${futureBacklog ? `<p class="small muted">仍有 ${futureBacklog} 个历史积压词已安排在后续日期逐步释放。</p>` : ''}
   `;
-  document.getElementById('batchSummary').innerHTML = batchSummary.map(item => `<p>${item.interval} 天前（${item.batchDate}）批次：<strong>${item.count}</strong> 个</p>`).join('') || '<p class="muted">暂无批次</p>';
+  document.getElementById('batchSummary').innerHTML = batchSummary.length
+    ? batchSummary.map(item => `<p>${item.interval} 天阶段：<strong>${item.count}</strong> 个</p>`).join('')
+    : '<p class="muted">今天没有正常到期词。</p>';
   document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
 }
 
@@ -575,9 +1588,8 @@ function renderReview() {
 
   const session = reviewSession;
   const { queue, batches, batch, item } = getSessionBatch(session);
-
   if (session.completed) {
-    done.textContent = '今日所有单词已复习完成。';
+    done.textContent = '当前正常复习已完成。';
     done.classList.remove('hidden');
     box.classList.add('hidden');
     summary.classList.add('hidden');
@@ -585,17 +1597,16 @@ function renderReview() {
   }
 
   done.classList.add('hidden');
-
   if (queue.length === 0 || !item) {
     box.classList.add('hidden');
     summary.classList.remove('hidden');
-    summary.textContent = '当前没有可复习内容。';
+    summary.textContent = '当前没有正常到期词。';
     return;
   }
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `${session.remedialRound ? `补救复习第 ${session.remedialRound} 轮 · ` : ''}复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `${session.remedialRound ? `当天补救第 ${session.remedialRound} 轮 · ` : ''}小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
 
   const modeText = document.getElementById('reviewModeText');
   const prompt = document.getElementById('reviewPrompt');
@@ -607,98 +1618,137 @@ function renderReview() {
   const answerWord = document.getElementById('answerWord');
   const answerMeaning = document.getElementById('answerMeaning');
   const answerExample = document.getElementById('answerExample');
+  const answerExampleMeaning = document.getElementById('answerExampleMeaning');
+  const answerExampleMeaningRow = document.getElementById('answerExampleMeaningRow');
   const echoRow = document.getElementById('reviewInputEchoRow');
   const attemptResult = document.getElementById('attemptResult');
   const autoJudge = document.getElementById('reviewAutoJudge');
+  const hintBox = document.getElementById('reviewHintBox');
+  const speakBtn = document.getElementById('reviewSpeakBtn');
+  const preActions = document.getElementById('reviewPreAnswerActions');
 
-  modeText.textContent = session.phase === 1 ? '第一轮：先看英文，心里回忆中文意思' : '第二轮：先看中文，输入英文拼写';
+  modeText.textContent = session.phase === 1 ? '第一轮：英文 → 中文，先主动回忆目标义项' : '第二轮：中文 → 英文，输入英文拼写';
   prompt.textContent = session.phase === 1 ? item.word : item.meaning;
-  meta.textContent = `标签：${(item.tags || []).join(' / ') || '无'} ｜ 词条ID：${item.id}`;
+  meta.textContent = `标签：${(item.tags || []).join(' / ') || '无'} ｜ 下次正常计划：${item.nextReviewDate || '未设置'}`;
   inputWrap.classList.toggle('hidden', session.phase !== 2);
   if (session.phase === 2) input.value = session.inputValue;
 
+  speakBtn.classList.toggle('hidden', session.phase !== 1);
+  speakBtn.onclick = () => speakWord(item.word);
+  if (session.phase === 1) maybeAutoSpeak(item.word, `normal:${item.id}:${session.batchIndex}:${session.remedialRound}:${session.phase}:${session.wordIndex}`);
+
+  if (session.usedHint) {
+    hintBox.textContent = session.phase === 1 ? makeMeaningHint(item.meaning) : makeEnglishHint(item.word);
+    hintBox.classList.remove('hidden');
+  } else {
+    hintBox.textContent = '';
+    hintBox.classList.add('hidden');
+  }
+
   answerBox.classList.toggle('hidden', !session.showAnswer);
   ratingWrap.classList.toggle('hidden', !session.showAnswer);
+  preActions.classList.toggle('hidden', session.showAnswer);
   answerWord.textContent = item.word;
   answerMeaning.textContent = item.meaning;
   answerExample.textContent = item.example || '—';
+  answerExampleMeaning.textContent = item.exampleMeaning || '';
+  answerExampleMeaningRow.classList.toggle('hidden', !item.exampleMeaning);
   echoRow.classList.toggle('hidden', session.phase !== 2);
   attemptResult.textContent = session.inputValue || '未输入';
   autoJudge.textContent = '';
   autoJudge.className = 'judge-text';
+
   let check = null;
   if (session.phase === 2) {
     check = getEnglishCheckResult(session.inputValue, item.word);
-    autoJudge.textContent = check.text;
-    autoJudge.classList.add(check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : '');
-    if (session.showAnswer) session.autoAgainReady = !check.isCorrect;
+    if (session.showAnswer) {
+      autoJudge.textContent = check.text;
+      autoJudge.classList.add(check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : 'judge-bad');
+      session.autoAgainReady = !check.isCorrect;
+    }
   }
 
-  const applyAgain = async () => {
-    await finishNormalReviewStep('Again', true);
-    await saveState();
-    resetWrongBookSession();
-    renderAll();
+  document.getElementById('hintBtn').onclick = () => {
+    if (reviewSubmitting) return;
+    session.usedHint = true;
+    renderReview();
   };
-  const applyPositive = async (rating) => {
-    await finishNormalReviewStep(rating, false);
-    await saveState();
-    renderAll();
+  document.getElementById('showAnswerBtn').onclick = () => {
+    if (reviewSubmitting) return;
+    session.showAnswer = true;
+    session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
+    session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
+    renderReview();
+  };
+  document.getElementById('giveUpBtn').onclick = () => {
+    if (reviewSubmitting) return;
+    session.forcedAgain = true;
+    session.showAnswer = true;
+    session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
+    session.autoAgainReady = true;
+    renderReview();
   };
 
-  if (!session.showAnswer) {
-    document.getElementById('showAnswerBtn').onclick = () => {
-      session.showAnswer = true;
-      session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
-      session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
-      renderReview();
-    };
+  const apply = rating => runReviewSubmission('normal', async () => {
+    const finalRating = capRatingForHint(rating, session.usedHint);
+    await finishNormalReviewStep(finalRating, finalRating === 'Again');
+  });
+
+  if (!session.showAnswer) return;
+
+  if (session.forcedAgain || session.autoAgainReady) {
+    ratingWrap.innerHTML = `
+      <div class="small" style="color:#be123c">${session.forcedAgain ? '已选择“不会”，本题判为 Again。' : '拼写不匹配，本题自动判为 Again。'}</div>
+      <div class="button-row wrap"><button class="btn again" data-action="again">已判 Again，下一题</button></div>
+    `;
+    ratingWrap.querySelector('[data-action="again"]').onclick = () => apply('Again');
     return;
   }
 
-  if (session.phase === 1) {
+  if (session.usedHint) {
     ratingWrap.innerHTML = `
-      <div class="small muted">选择标签后会自动记录并进入下一题；Again 会自动加入错词本。</div>
+      <div class="small muted">本题使用了轻提示，最高只能判 Hard。</div>
       <div class="button-row wrap">
-        <button class="btn easy" data-action="easy">Easy</button>
-        <button class="btn good" data-action="good">Good</button>
         <button class="btn hard" data-action="hard">Hard</button>
-        <button class="btn again" data-action="again">Again（自动加错词本）</button>
+        <button class="btn again" data-action="again">Again</button>
       </div>
     `;
-    ratingWrap.querySelector('[data-action="easy"]').onclick = () => applyPositive('Easy');
-    ratingWrap.querySelector('[data-action="good"]').onclick = () => applyPositive('Good');
-    ratingWrap.querySelector('[data-action="hard"]').onclick = () => applyPositive('Hard');
-    ratingWrap.querySelector('[data-action="again"]').onclick = () => applyAgain();
-  } else if (session.autoAgainReady) {
-    ratingWrap.innerHTML = `
-      <div class="small" style="color:#be123c">已自动判定为 Again，并会自动加入错词本。</div>
-      <div class="button-row wrap"><button class="btn again" data-action="autoAgain">已判 Again，下一题</button></div>
-    `;
-    ratingWrap.querySelector('[data-action="autoAgain"]').onclick = () => applyAgain();
-  } else {
-    ratingWrap.innerHTML = `
-      <div class="small muted">输入正确后，选择一个正确标签，会自动记录并进入下一题。</div>
-      <div class="button-row wrap">
-        <button class="btn easy" data-action="easy">Easy</button>
-        <button class="btn good" data-action="good">Good</button>
-        <button class="btn hard" data-action="hard">Hard</button>
-      </div>
-    `;
-    ratingWrap.querySelector('[data-action="easy"]').onclick = () => applyPositive('Easy');
-    ratingWrap.querySelector('[data-action="good"]').onclick = () => applyPositive('Good');
-    ratingWrap.querySelector('[data-action="hard"]').onclick = () => applyPositive('Hard');
+    ratingWrap.querySelector('[data-action="hard"]').onclick = () => apply('Hard');
+    ratingWrap.querySelector('[data-action="again"]').onclick = () => apply('Again');
+    return;
   }
+
+  ratingWrap.innerHTML = `
+    <div class="small muted">Easy：完整迅速；Good：主要义项掌握；Hard：回忆困难或遗漏重要义项；Again：核心义项失败。</div>
+    <div class="button-row wrap">
+      <button class="btn easy" data-action="easy">Easy</button>
+      <button class="btn good" data-action="good">Good</button>
+      <button class="btn hard" data-action="hard">Hard</button>
+      <button class="btn again" data-action="again">Again</button>
+    </div>
+  `;
+  ratingWrap.querySelector('[data-action="easy"]').onclick = () => apply('Easy');
+  ratingWrap.querySelector('[data-action="good"]').onclick = () => apply('Good');
+  ratingWrap.querySelector('[data-action="hard"]').onclick = () => apply('Hard');
+  ratingWrap.querySelector('[data-action="again"]').onclick = () => apply('Again');
 }
 
 async function finishNormalReviewStep(rating, addToWrongBook) {
   const session = reviewSession;
-  const { batches, batch, item, baseBatches } = getSessionBatch(session);
+  const { batch, item, baseBatches } = getSessionBatch(session);
   if (!item || !rating) return;
   const key = item.id;
   const prev = session.roundRatings[key] || {};
-  if (session.phase === 1) prev.phase1 = rating;
-  if (session.phase === 2) prev.phase2 = rating;
+  if (session.phase === 1) {
+    prev.phase1 = rating;
+    prev.hint1 = Boolean(session.usedHint);
+    prev.forced1 = Boolean(session.forcedAgain);
+  }
+  if (session.phase === 2) {
+    prev.phase2 = rating;
+    prev.hint2 = Boolean(session.usedHint);
+    prev.forced2 = Boolean(session.forcedAgain);
+  }
   session.roundRatings[key] = prev;
 
   state.logs.unshift({
@@ -710,14 +1760,16 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     rating,
     addedToWrongBook: addToWrongBook,
     inputValue: session.inputValue,
+    usedHint: Boolean(session.usedHint),
+    forcedAgain: Boolean(session.forcedAgain),
   });
-
-  if (addToWrongBook) adjustWrongBookCount(item.id, 1);
 
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
   session.showAnswer = false;
   session.autoAgainReady = false;
   session.inputValue = '';
+  session.usedHint = false;
+  session.forcedAgain = false;
 
   if (!isLastWordInBatch) {
     session.wordIndex += 1;
@@ -730,24 +1782,27 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     return;
   }
 
-  const shouldMark = reviewContext.type === 'today' || (reviewContext.type === 'batch' && getBatchDatesForTargetDate(todayStr(), state.settings.intervals).includes(reviewContext.sourceDate));
   const failedIds = [];
-
-  (session.currentPoolIds || []).forEach((id) => {
+  (session.currentPoolIds || []).forEach(id => {
     const result = session.roundRatings[id] || {};
-    const word = state.words.find((w) => w.id === id);
+    const word = state.words.find(w => w.id === id);
     if (!word) return;
+    const usedHint = Boolean(result.hint1 || result.hint2);
     const hadAgain = result.phase1 === 'Again' || result.phase2 === 'Again';
-    const finalRating = worseRating(result.phase1, result.phase2);
+    let finalRating = capRatingForHint(worseRating(result.phase1, result.phase2), usedHint);
+    if (hadAgain) finalRating = 'Again';
     word.lastReviewDate = todayStr();
     word.lastFinalRating = finalRating || word.lastFinalRating;
+
+    if (['Hard', 'Again'].includes(finalRating)) recordWeakOrError(id, finalRating, usedHint);
+
     if (hadAgain) {
       failedIds.push(id);
-    } else if (shouldMark) {
-      const reviewedOn = new Set(word.reviewedOnDates || []);
-      reviewedOn.add(todayStr());
-      word.reviewedOnDates = [...reviewedOn];
+      return;
     }
+
+    const isDue = !word.nextReviewDate || word.nextReviewDate <= todayStr();
+    if (isDue) advanceNormalSchedule(word, finalRating, usedHint);
   });
 
   session.batchOrders = {};
@@ -755,7 +1810,7 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
   session.wordIndex = 0;
 
   if (failedIds.length) {
-    session.currentPoolIds = failedIds;
+    session.currentPoolIds = [...new Set(failedIds)];
     session.remedialRound = (session.remedialRound || 0) + 1;
     session.phase = 1;
     return;
@@ -773,16 +1828,17 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
 }
 
 function renderWrongBook() {
-  const list = getWrongBookItems();
-  renderWrongBookList(list);
+  const allItems = getWrongBookItems();
+  const dueItems = getWrongBookItems({ dueOnly: true });
+  renderWrongBookList(allItems);
   ensureWrongBookSession();
   const done = document.getElementById('wrongbookDone');
   const roundDone = document.getElementById('wrongbookRoundDone');
   const box = document.getElementById('wrongbookReviewBox');
   const session = wrongBookSession;
 
-  if (list.length === 0) {
-    done.textContent = '错词本已清空，当前没有需要复习的错词。';
+  if (allItems.length === 0) {
+    done.textContent = '当前没有活跃薄弱词。历史错误记录仍保留在词条统计中。';
     done.classList.remove('hidden');
     roundDone.classList.add('hidden');
     box.innerHTML = '';
@@ -790,122 +1846,135 @@ function renderWrongBook() {
   }
 
   done.classList.add('hidden');
-
   if (session.roundCompleted) {
     roundDone.classList.remove('hidden');
-    roundDone.innerHTML = `本轮错词复习已完成，错词本仍剩 <strong>${list.length}</strong> 个词。<div class="button-row"><button class="btn" id="restartWrongbookRoundBtn">继续下一轮错词复习</button></div>`;
+    const nextDates = allItems.map(item => item.nextReviewDate).filter(Boolean).sort();
+    roundDone.innerHTML = `今天的薄弱词复习已完成。当前仍有 <strong>${allItems.length}</strong> 个活跃词。${nextDates.length ? `下一批日期：${escapeHtml(nextDates[0])}` : ''}`;
     box.innerHTML = '';
-    document.getElementById('restartWrongbookRoundBtn').onclick = () => {
-      startWrongBookSession();
-      renderWrongBook();
-    };
     return;
   }
 
   roundDone.classList.add('hidden');
-
   const { queue, batches, batch, item } = getSessionBatch(session);
   if (queue.length === 0 || !item) {
-    box.innerHTML = '<div class="muted">当前没有需要复习的错词。</div>';
+    box.innerHTML = `<div class="muted">今天没有到期的薄弱词。当前活跃词 ${allItems.length} 个，已按计划分散到后续日期。</div>`;
     return;
   }
 
   const check = session.phase === 2 ? getEnglishCheckResult(session.inputValue, item.word) : null;
   if (session.phase === 2 && session.showAnswer) session.autoAgainReady = !check.isCorrect;
-  const errorCount = Number(item.errorCount ?? 1) || 1;
+  const hintText = session.usedHint ? (session.phase === 1 ? makeMeaningHint(item.meaning) : makeEnglishHint(item.word)) : '';
+  const sourceText = item.source === 'recent' ? '近期薄弱词' : '历史积压词';
   box.innerHTML = `
-    <div class="summary-pill">复习小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
-    <p class="muted">${session.phase === 1 ? '第一轮：英文 → 中文' : '第二轮：中文 → 英文'}</p>
-    <div class="prompt">${escapeHtml(session.phase === 1 ? item.word : item.meaning)}</div>
+    <div class="summary-pill">${session.remedialRound ? `当天补强第 ${session.remedialRound} 轮 · ` : ''}小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}</div>
+    <p class="muted">${session.phase === 1 ? '第一轮：英文 → 中文' : '第二轮：中文 → 英文'} <span class="source-badge">${sourceText}</span></p>
+    <div class="prompt-row">
+      <div class="prompt">${escapeHtml(session.phase === 1 ? item.word : item.meaning)}</div>
+      ${session.phase === 1 ? '<button class="icon-btn" id="wrongbookSpeakBtn" type="button" aria-label="播放发音">🔊</button>' : ''}
+    </div>
+    ${hintText ? `<div class="hint-box">${escapeHtml(hintText)}</div>` : ''}
     ${session.phase === 2 ? `<label for="wrongbookInputEnglish">输入你回忆出的英文</label><input id="wrongbookInputEnglish" value="${escapeHtml(session.inputValue)}" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" enterkeyhint="done" data-gramm="false" />` : ''}
-    ${!session.showAnswer ? `<div class="button-row"><button class="btn primary" id="wrongbookShowAnswerBtn">显示答案</button></div>` : `
+    ${!session.showAnswer ? `
+      <div class="button-row wrap">
+        <button class="btn" id="wrongbookHintBtn">轻提示</button>
+        <button class="btn primary" id="wrongbookShowAnswerBtn">核对答案</button>
+        <button class="btn again" id="wrongbookGiveUpBtn">不会，显示答案</button>
+      </div>
+    ` : `
       <div class="answer-box">
         <p><strong>答案：</strong>${escapeHtml(item.word)}</p>
         <p><strong>释义：</strong>${escapeHtml(item.meaning)}</p>
-        <p><strong>当前错词次数：</strong>${errorCount}</p>
-        ${session.phase === 2 ? `<p><strong>你的拼写：</strong>${escapeHtml(session.inputValue || '未输入')}</p><p class="judge-text ${check.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : ''}">${escapeHtml(check.text)}</p>` : ''}
+        <p><strong>例句：</strong>${escapeHtml(item.example || '—')}</p>
+        ${item.exampleMeaning ? `<p><strong>例句中文：</strong>${escapeHtml(item.exampleMeaning)}</p>` : ''}
+        <p><strong>累计错误次数：</strong>${Number(item.errorCount || 0)}</p>
+        <p><strong>当前连续掌握：</strong>${Number(item.masteryStreak || 0)} / 3</p>
+        ${session.phase === 2 ? `<p><strong>你的拼写：</strong>${escapeHtml(session.inputValue || '未输入')}</p><p class="judge-text ${check?.checked ? (check.isCorrect ? 'judge-ok' : 'judge-bad') : 'judge-bad'}">${escapeHtml(check?.text || '')}</p>` : ''}
       </div>
-      <div class="small muted">Easy / Good / Hard 视为答对，错误次数 -1；Again 视为答错，错误次数 +1。</div>
       <div id="wrongbookActions"></div>
     `}
   `;
 
-  if (session.phase === 2) {
-    document.getElementById('wrongbookInputEnglish').oninput = (e) => {
+  if (session.phase === 1) {
+    document.getElementById('wrongbookSpeakBtn').onclick = () => speakWord(item.word);
+    maybeAutoSpeak(item.word, `wrong:${item.id}:${session.remedialRound}:${session.batchIndex}:${session.phase}:${session.wordIndex}`);
+  } else {
+    document.getElementById('wrongbookInputEnglish').oninput = e => {
       session.inputValue = e.target.value;
       if (session.showAnswer) renderWrongBook();
     };
   }
 
   if (!session.showAnswer) {
+    document.getElementById('wrongbookHintBtn').onclick = () => {
+      if (reviewSubmitting) return;
+      session.usedHint = true;
+      renderWrongBook();
+    };
     document.getElementById('wrongbookShowAnswerBtn').onclick = () => {
+      if (reviewSubmitting) return;
       session.showAnswer = true;
       session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
+      renderWrongBook();
+    };
+    document.getElementById('wrongbookGiveUpBtn').onclick = () => {
+      if (reviewSubmitting) return;
+      session.forcedAgain = true;
+      session.showAnswer = true;
+      session.autoAgainReady = true;
       renderWrongBook();
     };
     return;
   }
 
   const actions = document.getElementById('wrongbookActions');
-  const submit = async (rating) => {
-    await finishWrongBookReviewStep(rating);
-    await saveState();
-    renderAll();
-  };
+  const submit = rating => runReviewSubmission('wrongbook', async () => {
+    await finishWrongBookReviewStep(capRatingForHint(rating, session.usedHint));
+  });
 
-  if (session.phase === 1) {
-    actions.innerHTML = `
-      <div class="button-row wrap">
-        <button class="btn easy" data-action="easy">Easy</button>
-        <button class="btn good" data-action="good">Good</button>
-        <button class="btn hard" data-action="hard">Hard</button>
-        <button class="btn again" data-action="again">Again</button>
-      </div>
-    `;
+  if (session.forcedAgain || session.autoAgainReady) {
+    actions.innerHTML = `<div class="small" style="color:#be123c">${session.forcedAgain ? '已选择“不会”，本题判为 Again。' : '拼写不匹配，本题自动判为 Again。'}</div><div class="button-row wrap"><button class="btn again" data-action="again">已判 Again，下一题</button></div>`;
+    actions.querySelector('[data-action="again"]').onclick = () => submit('Again');
+  } else if (session.usedHint) {
+    actions.innerHTML = `<div class="small muted">使用轻提示后最高只能判 Hard。</div><div class="button-row wrap"><button class="btn hard" data-action="hard">Hard</button><button class="btn again" data-action="again">Again</button></div>`;
+    actions.querySelector('[data-action="hard"]').onclick = () => submit('Hard');
+    actions.querySelector('[data-action="again"]').onclick = () => submit('Again');
+  } else {
+    actions.innerHTML = `<div class="small muted">两个方向完成后统一安排下次复习；连续 3 次掌握后退出活跃队列。</div><div class="button-row wrap"><button class="btn easy" data-action="easy">Easy</button><button class="btn good" data-action="good">Good</button><button class="btn hard" data-action="hard">Hard</button><button class="btn again" data-action="again">Again</button></div>`;
     actions.querySelector('[data-action="easy"]').onclick = () => submit('Easy');
     actions.querySelector('[data-action="good"]').onclick = () => submit('Good');
     actions.querySelector('[data-action="hard"]').onclick = () => submit('Hard');
     actions.querySelector('[data-action="again"]').onclick = () => submit('Again');
-  } else if (session.autoAgainReady) {
-    actions.innerHTML = `
-      <div class="small" style="color:#be123c">已自动判定为 Again。</div>
-      <div class="button-row wrap"><button class="btn again" data-action="autoAgain">已判 Again，下一题</button></div>
-    `;
-    actions.querySelector('[data-action="autoAgain"]').onclick = () => submit('Again');
-  } else {
-    actions.innerHTML = `
-      <div class="small muted">输入正确后，选择一个正确标签，会自动记录并进入下一题。</div>
-      <div class="button-row wrap">
-        <button class="btn easy" data-action="easy">Easy</button>
-        <button class="btn good" data-action="good">Good</button>
-        <button class="btn hard" data-action="hard">Hard</button>
-      </div>
-    `;
-    actions.querySelector('[data-action="easy"]').onclick = () => submit('Easy');
-    actions.querySelector('[data-action="good"]').onclick = () => submit('Good');
-    actions.querySelector('[data-action="hard"]').onclick = () => submit('Hard');
   }
 }
-
 
 async function finishWrongBookReviewStep(rating) {
   const session = wrongBookSession;
   const { batches, batch, item } = getSessionBatch(session);
   if (!item || !rating) return;
   const result = session.roundRatings[item.id] || {};
-  if (session.phase === 1) result.phase1 = rating;
-  if (session.phase === 2) result.phase2 = rating;
+  if (session.phase === 1) {
+    result.phase1 = rating;
+    result.hint1 = Boolean(session.usedHint);
+    result.forced1 = Boolean(session.forcedAgain);
+  }
+  if (session.phase === 2) {
+    result.phase2 = rating;
+    result.hint2 = Boolean(session.usedHint);
+    result.forced2 = Boolean(session.forcedAgain);
+  }
   session.roundRatings[item.id] = result;
 
   state.logs.unshift({
     id: uuid(),
     ts: new Date().toLocaleString('zh-CN'),
     word: item.word,
-    source: '错词本复习',
+    source: session.remedialRound ? '错词本当天补强' : '错词本复习',
     pass: session.phase === 1 ? '英→中' : '中→英',
     rating,
     addedToWrongBook: false,
     inputValue: session.inputValue,
+    usedHint: Boolean(session.usedHint),
+    forcedAgain: Boolean(session.forcedAgain),
   });
 
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
@@ -913,15 +1982,24 @@ async function finishWrongBookReviewStep(rating) {
   session.showAnswer = false;
   session.autoAgainReady = false;
   session.inputValue = '';
+  session.usedHint = false;
+  session.forcedAgain = false;
 
   if (session.phase === 1) {
     if (!isLastWordInBatch) session.wordIndex += 1;
-    else { session.phase = 2; session.wordIndex = 0; }
+    else {
+      session.phase = 2;
+      session.wordIndex = 0;
+    }
     return;
   }
 
-  const bothCorrect = result.phase1 !== 'Again' && result.phase2 !== 'Again';
-  adjustWrongBookCount(item.id, bothCorrect ? -1 : 1);
+  const usedHint = Boolean(result.hint1 || result.hint2);
+  const hadAgain = result.phase1 === 'Again' || result.phase2 === 'Again';
+  let finalRating = capRatingForHint(worseRating(result.phase1, result.phase2), usedHint);
+  if (hadAgain) finalRating = 'Again';
+  settleRecoveryReview(item.id, finalRating, usedHint);
+  if (finalRating === 'Again') session.remedialIds.push(item.id);
   delete session.roundRatings[item.id];
 
   if (!isLastWordInBatch) {
@@ -931,7 +2009,17 @@ async function finishWrongBookReviewStep(rating) {
     session.phase = 1;
     session.wordIndex = 0;
   } else {
-    session.roundCompleted = true;
+    const remedialIds = [...new Set(session.remedialIds)];
+    if (remedialIds.length && session.remedialRound < 2) {
+      const remedialQueue = remedialIds.map(id => {
+        const word = state.words.find(w => w.id === id);
+        const entry = state.wrongBook.find(row => row.wordId === id);
+        return word ? { ...word, ...(entry || {}), id: word.id } : null;
+      }).filter(Boolean);
+      startWrongBookSession(remedialQueue, session.remedialRound + 1);
+    } else {
+      session.roundCompleted = true;
+    }
   }
 }
 
@@ -950,6 +2038,7 @@ function renderCalendar() {
   monthSelect.value = String(month + 1);
 
   const daysInMonth = getDaysInMonth(calendarCursor);
+  const activeRecoveryIds = getWrongBookIds();
   const grid = document.getElementById('calendarGrid');
   grid.innerHTML = ['一', '二', '三', '四', '五', '六', '日'].map(label => `<div class="weekday">周${label}</div>`).join('');
 
@@ -962,7 +2051,7 @@ function renderCalendar() {
   for (let day = 1; day <= daysInMonth; day++) {
     const ds = formatDate(new Date(year, month, day));
     const created = state.words.filter(word => word.createdAt === ds).length;
-    const due = state.words.filter(word => getBatchDatesForTargetDate(ds, state.settings.intervals).includes(word.createdAt)).length;
+    const due = state.words.filter(word => !activeRecoveryIds.has(word.id) && word.nextReviewDate === ds).length;
     grid.insertAdjacentHTML('beforeend', `
       <button class="day ${selectedDate === ds ? 'selected' : ''}" data-date="${ds}">
         <div class="date">${day}</div>
@@ -995,21 +2084,26 @@ function renderSelectedDateWords() {
 }
 
 function renderWordCardHtml(word, extraHtml = '', options = {}) {
-  const wrongCount = getWrongBookMap().get(word.id) ?? word.errorCount;
+  const entry = getWrongEntry(word.id);
+  const wrongCount = Number(entry?.errorCount ?? word.errorCount ?? word.totalErrorCount ?? 0);
   const editable = options.editable !== false;
   const deletable = options.deletable !== false;
   const swipeable = Boolean(options.swipeable && (editable || deletable));
+  const stage = Math.min(Number(word.scheduleStage || word.stageIndex || 0), state.settings.intervals.length - 1);
+  const interval = state.settings.intervals[stage] ?? state.settings.intervals.at(-1) ?? 0;
+  const recoveryHtml = entry ? ` · <span class="recovery-meta">薄弱词下次：${escapeHtml(entry.nextReviewDate || '待安排')}</span>` : '';
   const bodyHtml = `
       <div class="word-head">
         <div>
-          <strong>${escapeHtml(word.word)}</strong>
+          <div class="word-title-row"><strong>${escapeHtml(word.word)}</strong><button class="icon-btn" data-action="speak" type="button" aria-label="播放发音">🔊</button></div>
           <div>${escapeHtml(word.meaning)}</div>
         </div>
-        <div class="small muted">阶段 ${word.stageIndex || 0}（${state.settings.intervals[word.stageIndex || 0] ?? state.settings.intervals[0]} 天）</div>
+        <div class="small muted">阶段 ${stage}（${interval} 天）</div>
       </div>
       <div style="margin-top:8px;">${escapeHtml(word.example || '—')}</div>
+      ${word.exampleMeaning ? `<div class="small muted" style="margin-top:4px;">${escapeHtml(word.exampleMeaning)}</div>` : ''}
       <div class="pills">${(word.tags || []).map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join('')}</div>
-      <div class="small muted" style="margin-top:8px;">录入：${word.createdAt}${wrongCount ? ` · 错词次数：${wrongCount}` : ''}${extraHtml}</div>
+      <div class="small muted" style="margin-top:8px;">录入：${escapeHtml(word.createdAt || '')} · 正常下次：${escapeHtml(word.nextReviewDate || '未安排')}${wrongCount ? ` · 累计错误：${wrongCount}` : ''}${recoveryHtml}${extraHtml}</div>
       ${(!swipeable && (editable || deletable)) ? `<div class="word-actions">${editable ? '<button class="btn" data-action="edit">编辑</button>' : ''}${deletable ? '<button class="btn danger-outline" data-action="delete">删除</button>' : ''}</div>` : ''}
     `;
 
@@ -1083,6 +2177,8 @@ function attachWordCardEvents(container) {
     if (!word) return;
     const editBtn = card.querySelector('[data-action="edit"]');
     const deleteBtn = card.querySelector('[data-action="delete"]');
+    const speakBtn = card.querySelector('[data-action="speak"]');
+    if (speakBtn) speakBtn.onclick = (e) => { e.stopPropagation(); speakWord(word.word); };
     if (editBtn) editBtn.onclick = (e) => { e.stopPropagation(); activeSwipeCard = null; openEditModal(word.id); };
     if (deleteBtn) deleteBtn.onclick = async (e) => {
       e.stopPropagation();
@@ -1106,7 +2202,7 @@ function renderLibrary() {
   const q = librarySearch.trim().toLowerCase();
   let words = [...state.words].sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.word.localeCompare(b.word));
   if (q) {
-    words = words.filter(word => [word.word, word.meaning, word.example, ...(word.tags || [])].some(value => String(value || '').toLowerCase().includes(q)));
+    words = words.filter(word => [word.word, word.meaning, word.example, word.exampleMeaning, ...(word.tags || [])].some(value => String(value || '').toLowerCase().includes(q)));
     countEl.textContent = `当前匹配词条：${words.length}`;
     countEl.classList.remove('hidden');
   } else {
@@ -1132,25 +2228,37 @@ function renderWrongBookList(items = getWrongBookItems()) {
     return;
   }
   container.innerHTML = items.map(word => renderWordCardHtml(word, '', { editable: false, deletable: false })).join('');
+  attachWordCardEvents(container);
 }
 
 
 function renderLog() {
   const container = document.getElementById('logList');
-  container.innerHTML = state.logs.length ? state.logs.slice(0, 200).map(log => `
+  const visible = state.logs.slice(0, logDisplayLimit);
+  const cards = visible.map(log => `
     <div class="list-item">
       <div class="word-head"><strong>${escapeHtml(log.word)}</strong><div>${escapeHtml(log.rating || '')}</div></div>
       <div class="small muted">${escapeHtml(log.ts || '')}</div>
       <div class="small">来源：${escapeHtml(log.source || '')} ｜ 回忆方向：${escapeHtml(log.pass || '')}</div>
-      <div class="small">加入错词本：${log.addedToWrongBook ? '是' : '否'}</div>
+      <div class="small">加入错词本：${log.addedToWrongBook ? '是' : '否'}${log.usedHint ? ' ｜ 使用提示：是' : ''}${log.forcedAgain ? ' ｜ 主动放弃：是' : ''}</div>
       ${log.inputValue ? `<div class="small">输入：${escapeHtml(log.inputValue)}</div>` : ''}
-    </div>
-  `).join('') : '<div class="muted">暂无记录。</div>';
+    </div>`).join('');
+  container.innerHTML = state.logs.length
+    ? `${cards}${state.logs.length > visible.length ? `<button class="btn" id="loadMoreLogsBtn">加载更多（已显示 ${visible.length} / ${state.logs.length}）</button>` : `<div class="small muted">共 ${state.logs.length} 条记录。</div>`}`
+    : '<div class="muted">暂无记录。</div>';
+  document.getElementById('loadMoreLogsBtn')?.addEventListener('click', () => {
+    logDisplayLimit += 200;
+    renderLog();
+  });
 }
 
 function renderSettings() {
   document.getElementById('dailyQuotaSelect').value = String(state.settings.dailyQuota);
   document.getElementById('intervalInput').value = state.settings.intervals.join(',');
+  document.getElementById('backlogDailyLimitSelect').value = String(state.settings.backlogDailyLimit);
+  document.getElementById('longTermDailyLimitSelect').value = String(state.settings.longTermDailyLimit);
+  document.getElementById('pronunciationLocaleSelect').value = state.settings.pronunciationLocale || 'en-US';
+  document.getElementById('autoPronounceCheckbox').checked = Boolean(state.settings.autoPronounce);
 
   const settingsMsgEl = document.getElementById('settingsMsg');
   if (settingsMessage) {
@@ -1207,11 +2315,11 @@ function renderSettings() {
       </div>`;
     document.getElementById('confirmImportBtn').onclick = async () => {
       if (!pendingImportState) return;
-      state = sanitizeImportedState(pendingImportState);
+      const importedState = sanitizeImportedState(pendingImportState);
+      await saveState(importedState, { allowLargeDecrease: true, snapshotReason: 'import-before' });
       pendingImportState = null;
       pendingImportPreview = null;
       exportPreviewText = '';
-      await saveState();
       resetNormalReviewSession();
       resetWrongBookSession();
       calendarCursor = new Date();
@@ -1239,6 +2347,15 @@ function renderSettings() {
   } else {
     exportBox.classList.add('hidden');
     exportBox.innerHTML = '';
+  }
+
+  const storageStatus = document.getElementById('storageStatus');
+  if (storageStatus) {
+    storageStatus.innerHTML = `<div>IndexedDB：<strong>${escapeHtml(storageHealth.indexedDB)}</strong></div><div>localStorage 镜像：<strong>${escapeHtml(storageHealth.localStorage)}</strong></div><div>当前修订号：${currentRevision}</div><div>最近成功保存：${escapeHtml(lastKnownMeta?.savedAt || '—')}</div>${storageHealth.warning ? `<div style="color:#b45309">${escapeHtml(storageHealth.warning)}</div>` : ''}`;
+  }
+  const snapshotList = document.getElementById('snapshotList');
+  if (snapshotList) {
+    snapshotList.innerHTML = snapshotSummaries.length ? snapshotSummaries.map(item => `<div class="list-item"><div><strong>${escapeHtml(new Date(item.createdAt).toLocaleString('zh-CN'))}</strong></div><div class="small muted">${escapeHtml(item.reason || '')} ｜ ${item.wordCount} 词 ｜ ${item.logCount} 条记录</div><div class="button-row wrap compact-row"><button class="btn small-btn restore-snapshot-btn" data-id="${escapeHtml(item.id)}">恢复</button><button class="btn small-btn export-snapshot-btn" data-id="${escapeHtml(item.id)}">导出</button></div></div>`).join('') : '<div class="small muted">暂时没有自动快照。</div>';
   }
 }
 
@@ -1272,6 +2389,8 @@ function openEditModal(wordId) {
   document.getElementById('editMeaningInput').value = word.meaning || '';
   autoResizeTextarea(document.getElementById('editMeaningInput'));
   document.getElementById('editExampleInput').value = word.example || '';
+  document.getElementById('editExampleMeaningInput').value = word.exampleMeaning || '';
+  document.getElementById('editExampleLookupStatus').textContent = '';
   document.getElementById('editTagInput').value = (word.tags || []).join(', ');
   document.getElementById('editCreatedAtInput').value = word.createdAt || todayStr();
   document.getElementById('editModal').classList.remove('hidden');
@@ -1297,6 +2416,7 @@ async function saveEditModal() {
   target.word = nextWord;
   target.meaning = document.getElementById('editMeaningInput').value.trim();
   target.example = document.getElementById('editExampleInput').value.trim();
+  target.exampleMeaning = document.getElementById('editExampleMeaningInput').value.trim();
   target.tags = document.getElementById('editTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   target.createdAt = document.getElementById('editCreatedAtInput').value || todayStr();
   try {
@@ -1313,17 +2433,6 @@ async function saveEditModal() {
   showToast('已保存修改');
 }
 
-function adjustWrongBookCount(wordId, delta) {
-  const existing = state.wrongBook.find(item => item.wordId === wordId);
-  if (!existing) {
-    if (delta > 0) state.wrongBook.push({ wordId, errorCount: delta });
-    return;
-  }
-  existing.errorCount += delta;
-  if (existing.errorCount <= 0) {
-    state.wrongBook = state.wrongBook.filter(item => item.wordId !== wordId);
-  }
-}
 
 async function addWord(entry) {
   const duplicate = findDuplicateWord(entry.word);
@@ -1346,14 +2455,17 @@ async function handleAddTodayWord() {
   const word = document.getElementById('wordInput').value.trim();
   const meaning = document.getElementById('meaningInput').value.trim();
   const example = document.getElementById('exampleInput').value.trim();
+  const exampleMeaning = document.getElementById('exampleMeaningInput').value.trim();
   const tags = document.getElementById('tagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
-  const result = await addWord({ word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 });
+  const result = await addWord({ word, meaning, example, exampleMeaning, tags, createdAt: todayStr(), stageIndex: 0, scheduleStage: 0, nextReviewDate: todayStr() });
   if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('wordInput').value = '';
   document.getElementById('meaningInput').value = '';
   autoResizeTextarea(document.getElementById('meaningInput'));
   document.getElementById('exampleInput').value = '';
+  document.getElementById('exampleMeaningInput').value = '';
+  document.getElementById('exampleLookupStatus').textContent = '';
   document.getElementById('tagInput').value = '';
   clearDraft('today');
   showToast('已添加到今天');
@@ -1363,17 +2475,36 @@ async function handleAddWordToSelectedDate() {
   const word = document.getElementById('calendarWordInput').value.trim();
   const meaning = document.getElementById('calendarMeaningInput').value.trim();
   const example = document.getElementById('calendarExampleInput').value.trim();
+  const exampleMeaning = document.getElementById('calendarExampleMeaningInput').value.trim();
   const tags = document.getElementById('calendarTagInput').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!word || !meaning) return showToast('请填写单词和释义');
-  const result = await addWord({ word, meaning, example, tags, createdAt: selectedDate, stageIndex: 0 });
+  const result = await addWord({ word, meaning, example, exampleMeaning, tags, createdAt: selectedDate, stageIndex: 0, scheduleStage: 0, nextReviewDate: selectedDate <= todayStr() ? todayStr() : selectedDate });
   if (!result?.ok) return showToast(result.saveFailed ? '保存失败，请重试，草稿已保留' : `该单词已在词库中，未重复录入（${result.duplicate.word}）`);
   document.getElementById('calendarWordInput').value = '';
   document.getElementById('calendarMeaningInput').value = '';
   autoResizeTextarea(document.getElementById('calendarMeaningInput'));
   document.getElementById('calendarExampleInput').value = '';
+  document.getElementById('calendarExampleMeaningInput').value = '';
+  document.getElementById('calendarExampleLookupStatus').textContent = '';
   document.getElementById('calendarTagInput').value = '';
   clearDraft('calendar');
   showToast(`已添加到 ${selectedDate}`);
+}
+
+function buildExportPayload() {
+  const prepared = sanitizeImportedState(cloneValue(state));
+  return {
+    ...prepared,
+    exportMetadata: {
+      appVersion: APP_VERSION_NUMBER,
+      schemaVersion: SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      revision: currentRevision,
+      wordCount: prepared.words.length,
+      logCount: prepared.logs.length,
+      checksum: checksumState(prepared),
+    },
+  };
 }
 
 function bindEvents() {
@@ -1382,27 +2513,40 @@ function bindEvents() {
   });
 
   document.getElementById('addWordBtn').addEventListener('click', handleAddTodayWord);
-  ['wordInput', 'meaningInput', 'exampleInput', 'tagInput'].forEach(id => {
+  ['wordInput', 'meaningInput', 'exampleInput', 'exampleMeaningInput', 'tagInput'].forEach(id => {
     document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('today'));
   });
   const meaningInputEl = document.getElementById('meaningInput');
-  if (meaningInputEl) { meaningInputEl.addEventListener('input', () => autoResizeTextarea(meaningInputEl)); autoResizeTextarea(meaningInputEl); }
+  if (meaningInputEl) {
+    meaningInputEl.addEventListener('input', () => autoResizeTextarea(meaningInputEl));
+    autoResizeTextarea(meaningInputEl);
+  }
+  document.getElementById('speakAddWordBtn').addEventListener('click', () => speakWord(document.getElementById('wordInput').value));
+  document.getElementById('generateExampleBtn').addEventListener('click', () => autoFillExample({
+    wordInputId: 'wordInput',
+    meaningInputId: 'meaningInput',
+    exampleInputId: 'exampleInput',
+    exampleMeaningInputId: 'exampleMeaningInput',
+    statusId: 'exampleLookupStatus',
+  }));
+
   document.getElementById('addBatchDemoBtn').addEventListener('click', async () => {
+    await createSnapshot('batch-add-before', state);
     const demo = [
-      ['negotiate', '谈判；协商', 'We need to negotiate a better price.', ['工作', '口语']],
-      ['commute', '通勤', 'My commute takes about forty minutes.', ['口语']],
-      ['itinerary', '行程安排', 'I shared the itinerary with the team.', ['旅行', '工作']],
-      ['hesitate', '犹豫', 'Don’t hesitate to ask questions.', ['口语']],
-      ['accurate', '准确的', 'Your pronunciation is quite accurate.', ['口语']],
+      ['negotiate', '谈判；协商', 'We need to negotiate a better price.', '我们需要协商一个更好的价格。', ['工作', '口语']],
+      ['commute', '通勤', 'My commute takes about forty minutes.', '我通勤大约需要四十分钟。', ['口语']],
+      ['itinerary', '行程安排', 'I shared the itinerary with the team.', '我把行程安排分享给了团队。', ['旅行', '工作']],
+      ['hesitate', '犹豫', 'Don’t hesitate to ask questions.', '有问题不要犹豫，尽管提问。', ['口语']],
+      ['accurate', '准确的', 'Your pronunciation is quite accurate.', '你的发音很准确。', ['口语']],
     ];
     let added = 0;
     let skipped = 0;
-    for (const [word, meaning, example, tags] of demo) {
+    for (const [word, meaning, example, exampleMeaning, tags] of demo) {
       if (findDuplicateWord(word)) {
         skipped += 1;
         continue;
       }
-      state.words.push(normalizeWord({ id: uuid(), word, meaning, example, tags, createdAt: todayStr(), stageIndex: 0 }));
+      state.words.push(normalizeWord({ id: uuid(), word, meaning, example, exampleMeaning, tags, createdAt: todayStr(), stageIndex: 0, scheduleStage: 0, nextReviewDate: todayStr() }));
       added += 1;
     }
     await saveState();
@@ -1411,16 +2555,37 @@ function bindEvents() {
     renderAll();
     showToast(skipped ? `已导入 ${added} 个示例，跳过 ${skipped} 个重复单词` : `已导入 ${added} 个示例`);
   });
+
   document.getElementById('addWordToSelectedDateBtn').addEventListener('click', handleAddWordToSelectedDate);
-  ['calendarWordInput', 'calendarMeaningInput', 'calendarExampleInput', 'calendarTagInput'].forEach(id => {
+  ['calendarWordInput', 'calendarMeaningInput', 'calendarExampleInput', 'calendarExampleMeaningInput', 'calendarTagInput'].forEach(id => {
     document.getElementById(id).addEventListener('input', () => captureDraftFromInputs('calendar'));
   });
   const calendarMeaningInputEl = document.getElementById('calendarMeaningInput');
-  if (calendarMeaningInputEl) { calendarMeaningInputEl.addEventListener('input', () => autoResizeTextarea(calendarMeaningInputEl)); autoResizeTextarea(calendarMeaningInputEl); }
-  const editMeaningInputEl = document.getElementById('editMeaningInput');
-  if (editMeaningInputEl) { editMeaningInputEl.addEventListener('input', () => autoResizeTextarea(editMeaningInputEl)); }
+  if (calendarMeaningInputEl) {
+    calendarMeaningInputEl.addEventListener('input', () => autoResizeTextarea(calendarMeaningInputEl));
+    autoResizeTextarea(calendarMeaningInputEl);
+  }
+  document.getElementById('speakCalendarWordBtn').addEventListener('click', () => speakWord(document.getElementById('calendarWordInput').value));
+  document.getElementById('generateCalendarExampleBtn').addEventListener('click', () => autoFillExample({
+    wordInputId: 'calendarWordInput',
+    meaningInputId: 'calendarMeaningInput',
+    exampleInputId: 'calendarExampleInput',
+    exampleMeaningInputId: 'calendarExampleMeaningInput',
+    statusId: 'calendarExampleLookupStatus',
+  }));
 
-  document.getElementById('librarySearchInput').addEventListener('input', (e) => {
+  const editMeaningInputEl = document.getElementById('editMeaningInput');
+  if (editMeaningInputEl) editMeaningInputEl.addEventListener('input', () => autoResizeTextarea(editMeaningInputEl));
+  document.getElementById('speakEditWordBtn').addEventListener('click', () => speakWord(document.getElementById('editWordInput').value));
+  document.getElementById('generateEditExampleBtn').addEventListener('click', () => autoFillExample({
+    wordInputId: 'editWordInput',
+    meaningInputId: 'editMeaningInput',
+    exampleInputId: 'editExampleInput',
+    exampleMeaningInputId: 'editExampleMeaningInput',
+    statusId: 'editExampleLookupStatus',
+  }));
+
+  document.getElementById('librarySearchInput').addEventListener('input', e => {
     librarySearch = e.target.value || '';
     renderLibrary();
   });
@@ -1441,39 +2606,24 @@ function bindEvents() {
     switchTab('review');
   });
 
-  document.getElementById('showAnswerBtn').addEventListener('click', () => {
-    ensureNormalReviewSession();
-    reviewSession.showAnswer = true;
-    reviewSession.inputValue = document.getElementById('reviewInputEnglish').value.trim();
-    reviewSession.autoAgainReady = reviewSession.phase === 2 && !getEnglishCheckResult(reviewSession.inputValue, getSessionBatch(reviewSession).item.word).isCorrect;
-    renderReview();
-  });
   document.getElementById('skipBtn').addEventListener('click', () => {
     ensureNormalReviewSession();
-    const session = reviewSession;
-    const { batches, batch } = getSessionBatch(session);
-    const isLastWordInBatch = session.wordIndex >= batch.length - 1;
-    const isLastBatch = session.batchIndex >= batches.length - 1;
-    session.showAnswer = false;
-    session.inputValue = '';
-    session.autoAgainReady = false;
-    if (!isLastWordInBatch) session.wordIndex += 1;
-    else if (session.phase === 1) { session.phase = 2; session.wordIndex = 0; }
-    else if (!isLastBatch) { session.batchIndex += 1; session.phase = 1; session.wordIndex = 0; }
-    else session.completed = true;
-    renderReview();
+    runReviewSubmission('normal', async () => {
+      await finishNormalReviewStep('Again', true);
+      showToast('跳过已按 Again 处理');
+    });
   });
-  document.getElementById('reviewInputEnglish').addEventListener('input', (e) => {
+  document.getElementById('reviewInputEnglish').addEventListener('input', e => {
     ensureNormalReviewSession();
     reviewSession.inputValue = e.target.value;
     if (reviewSession.showAnswer) renderReview();
   });
 
-  document.getElementById('calendarYearSelect').addEventListener('change', (e) => {
+  document.getElementById('calendarYearSelect').addEventListener('change', e => {
     calendarCursor = new Date(Number(e.target.value), calendarCursor.getMonth(), 1);
     renderCalendar();
   });
-  document.getElementById('calendarMonthSelect').addEventListener('change', (e) => {
+  document.getElementById('calendarMonthSelect').addEventListener('change', e => {
     calendarCursor = new Date(calendarCursor.getFullYear(), Number(e.target.value) - 1, 1);
     renderCalendar();
   });
@@ -1488,7 +2638,7 @@ function bindEvents() {
 
   document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
     const dailyQuota = Number(document.getElementById('dailyQuotaSelect').value);
-    const nextIntervals = normalizeIntervalsFromText(document.getElementById('intervalInput').value);
+    const nextIntervals = ensureLongIntervals(normalizeIntervalsFromText(document.getElementById('intervalInput').value));
     if (!nextIntervals.length) {
       settingsMessage = '复习间隔不能为空。';
       renderSettings();
@@ -1498,16 +2648,27 @@ function bindEvents() {
     state.settings.dailyQuota = dailyQuota;
     state.settings.batchSize = dailyQuota;
     state.settings.intervals = nextIntervals;
-    state.words = state.words.map(word => ({ ...word, stageIndex: remapStageIndex(oldIntervals, nextIntervals, word.stageIndex || 0) }));
-    settingsMessage = `已保存复习间隔：${nextIntervals.join(', ')}`;
+    state.settings.backlogDailyLimit = Number(document.getElementById('backlogDailyLimitSelect').value) || 8;
+    state.settings.longTermDailyLimit = Number(document.getElementById('longTermDailyLimitSelect').value) || 5;
+    state.settings.pronunciationLocale = document.getElementById('pronunciationLocaleSelect').value || 'en-US';
+    state.settings.autoPronounce = document.getElementById('autoPronounceCheckbox').checked;
+    state.words = state.words.map(word => {
+      const nextStage = remapStageIndex(oldIntervals, nextIntervals, word.scheduleStage || word.stageIndex || 0);
+      return { ...word, scheduleStage: nextStage, stageIndex: nextStage };
+    });
+    reschedulePendingLegacyBacklog();
+    reschedulePendingNormalCatchup();
+    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史错词每天 ${state.settings.backlogDailyLimit} 个。`;
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
+    lastAutoSpokenKey = '';
     renderAll();
     showToast('设置已保存');
   });
+
   document.getElementById('exportBtn').addEventListener('click', () => {
-    const jsonText = JSON.stringify(state, null, 2);
+    const jsonText = JSON.stringify(buildExportPayload(), null, 2);
     exportPreviewText = jsonText;
     const blob = new Blob(['﻿' + jsonText], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1519,42 +2680,46 @@ function bindEvents() {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    dataMessage = '已生成 JSON 下载。若没有自动下载，请点击下方“再次下载 JSON”，或先用“显示导出 JSON 内容”检查数据。';
+    dataMessage = '已生成 JSON 下载。';
     renderSettings();
     showToast('已生成导出数据');
   });
   document.getElementById('showExportBtn').addEventListener('click', () => {
-    exportPreviewText = JSON.stringify(state, null, 2);
-    dataMessage = '已在下方显示导出 JSON 内容，可先检查中文与数据结构。';
+    exportPreviewText = JSON.stringify(buildExportPayload(), null, 2);
+    dataMessage = '已在下方显示导出 JSON 内容。';
     renderSettings();
   });
   document.getElementById('copyExportBtn').addEventListener('click', async () => {
     try {
-      const text = exportPreviewText || JSON.stringify(state, null, 2);
+      const text = exportPreviewText || JSON.stringify(buildExportPayload(), null, 2);
       await navigator.clipboard.writeText(text);
       exportPreviewText = text;
       dataMessage = 'JSON 内容已复制到剪贴板。';
     } catch {
-      dataMessage = '复制失败，请先点击“显示导出 JSON 内容”，再手动复制。';
+      dataMessage = '复制失败，请先显示 JSON，再手动复制。';
     }
     renderSettings();
   });
-  document.getElementById('importInput').addEventListener('change', async (event) => {
+
+  document.getElementById('importInput').addEventListener('change', async event => {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
       const parsed = JSON.parse(await file.text());
-      const normalized = sanitizeImportedState(parsed);
+      const rawImported = parsed?.state && parsed?.metadata ? parsed.state : parsed;
+      const shape = validateRawStateShape(rawImported);
+      if (!shape.ok) throw new Error(shape.error);
+      const normalized = sanitizeImportedState(rawImported);
       const words = normalized.words || [];
       const suspiciousCount = words.reduce((acc, word) => {
-        const fields = [word.word, word.meaning, word.example, ...(Array.isArray(word.tags) ? word.tags : [])];
-        return acc + (fields.some(v => looksLikeMojibake(v)) ? 1 : 0);
+        const fields = [word.word, word.meaning, word.example, word.exampleMeaning, ...(Array.isArray(word.tags) ? word.tags : [])];
+        return acc + (fields.some(value => looksLikeMojibake(value)) ? 1 : 0);
       }, 0);
       pendingImportState = normalized;
       pendingImportPreview = {
         fileName: file.name,
         wordCount: words.length,
-        wrongBookCount: (normalized.wrongBook || []).length,
+        wrongBookCount: (normalized.wrongBook || []).filter(item => item.active !== false).length,
         logCount: (normalized.logs || []).length,
         hasSettings: Boolean(normalized.settings),
         intervals: Array.isArray(normalized.settings?.intervals) ? normalized.settings.intervals.join(', ') : '无',
@@ -1562,7 +2727,7 @@ function bindEvents() {
         suspiciousCount,
         sampleWords: words.slice(0, 5).map(word => ({ word: word.word || '', meaning: word.meaning || '' })),
       };
-      dataMessage = '已读取 JSON，请先查看导入前预检结果，再决定是否覆盖当前本地数据。';
+      dataMessage = '已读取 JSON，请先查看导入前预检结果。';
       renderSettings();
     } catch {
       pendingImportState = null;
@@ -1574,12 +2739,39 @@ function bindEvents() {
       event.target.value = '';
     }
   });
+
+  document.getElementById('createSnapshotBtn')?.addEventListener('click', async () => {
+    await createSnapshot('manual', state);
+    renderSettings();
+    showToast('已创建快照');
+  });
+  document.getElementById('snapshotList')?.addEventListener('click', async event => {
+    const restoreBtn = event.target.closest('.restore-snapshot-btn');
+    const exportBtn = event.target.closest('.export-snapshot-btn');
+    const id = restoreBtn?.dataset.id || exportBtn?.dataset.id;
+    if (!id) return;
+    const snapshot = await getSnapshotById(id);
+    if (!snapshot) return showToast('未找到快照');
+    if (restoreBtn) {
+      if (!confirm(`确定恢复该快照吗？快照包含 ${snapshot.wordCount} 个词。恢复前会再保存当前状态。`)) return;
+      try {
+        await restoreSnapshot(id);
+        renderSettings();
+        showToast('快照恢复成功');
+      } catch (error) {
+        showToast(`恢复失败：${error?.message || error}`);
+      }
+    } else {
+      downloadJSONFile({ ...snapshot.state, snapshotMetadata: { id: snapshot.id, reason: snapshot.reason, createdAt: snapshot.createdAt, checksum: snapshot.checksum } }, `word_recall_snapshot_${snapshot.createdAt.slice(0, 10)}.json`);
+    }
+  });
+
   document.getElementById('clearAllBtn').addEventListener('click', async () => {
     if (!confirm('确定清空所有本地数据吗？')) return;
-    state = structuredClone(defaultState);
+    const emptyState = structuredClone(defaultState);
+    await saveState(emptyState, { allowLargeDecrease: true, snapshotReason: 'clear-all-before' });
     clearDraft('today');
     clearDraft('calendar');
-    await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
     reviewContext = { type: 'today', sourceDate: null };
@@ -1589,9 +2781,7 @@ function bindEvents() {
     showToast('已清空');
   });
 
-  document.getElementById('saveEditBtn').addEventListener('click', async () => {
-    await saveEditModal();
-  });
+  document.getElementById('saveEditBtn').addEventListener('click', saveEditModal);
   document.getElementById('cancelEditBtn').addEventListener('click', closeEditModal);
   document.getElementById('editBackdrop').addEventListener('click', closeEditModal);
 }
@@ -1599,7 +2789,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.5-beta');
+      await navigator.serviceWorker.register('./sw.js?v=5.7.0');
     } catch {
       // ignore
     }
@@ -1607,10 +2797,22 @@ async function registerSW() {
 }
 
 (async function init() {
-  db = await openDB();
-  await loadState();
+  try {
+    db = await openDB();
+    dbOpenError = null;
+  } catch (error) {
+    db = null;
+    dbOpenError = error;
+  }
+  const loaded = await loadState();
   selectedDate = todayStr();
   calendarCursor = new Date();
+  if (!loaded) {
+    renderFatalDataError();
+    bindFatalRecoveryEvents();
+    registerSW();
+    return;
+  }
   bindEvents();
   applyDraftToInputs('today');
   applyDraftToInputs('calendar');
