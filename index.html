@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.7.1" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.7.1" />
-  <link rel="stylesheet" href="./styles.css?v=5.7.1" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.8" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.8" />
+  <link rel="stylesheet" href="./styles.css?v=5.8" />
 </head>
 <body>
   <header class="app-header">
@@ -50,7 +50,7 @@
           <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.7.1</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.8</div>
     </section>
 
     <section id="review" class="view">
@@ -59,6 +59,7 @@
         <div id="reviewBanner" class="banner hidden"></div>
         <div id="reviewSummary" class="summary-pill hidden"></div>
         <div id="reviewDone" class="done-box hidden"></div>
+        <div id="reviewAudioStartBox" class="done-box hidden"></div>
         <div id="reviewBox" class="hidden">
           <p class="muted" id="reviewModeText">第一轮：先看英文，心里回忆中文意思</p>
           <div class="prompt-row">
@@ -239,12 +240,9 @@
           <option value="10">10 个</option>
         </select>
 
-        <label for="longTermDailyLimitSelect">每日释放逾期正常旧词</label>
-        <select id="longTermDailyLimitSelect">
-          <option value="3">3 个</option>
-          <option value="5">5 个</option>
-          <option value="8">8 个</option>
-        </select>
+        <label for="longTermDailyLimitSelect">每日正常复习积压释放数量</label>
+        <input id="longTermDailyLimitSelect" type="number" min="0" max="999" step="1" inputmode="numeric" value="10" />
+        <div class="small muted" style="margin-top:8px;">先完成当天真正到期的单词，再选择是否恢复历史积压。0 表示不释放，999 近似全部释放。</div>
 
         <div class="button-row wrap">
           <button class="btn primary" id="saveSettingsBtn">保存设置</button>
@@ -379,6 +377,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.7.1" defer></script>
+  <script src="./app.js?v=5.8" defer></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
-const APP_VERSION = 'v5.7.1';
-const APP_VERSION_NUMBER = '5.7.1';
+const APP_VERSION = 'v5.8';
+const APP_VERSION_NUMBER = '5.8.0';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -32,7 +32,7 @@ const defaultState = {
     dailyQuota: 5,
     intervals: DEFAULT_INTERVALS,
     backlogDailyLimit: 8,
-    longTermDailyLimit: 5,
+    longTermDailyLimit: 10,
     pronunciationLocale: 'en-US',
     autoPronounce: true,
     cachePronunciationOnAdd: true,
@@ -63,9 +63,13 @@ let showWrongList = false;
 let activeSwipeCard = null;
 let lastAutoSpokenKey = '';
 let activePronunciationAudio = null;
+let pronunciationAudioUnlocked = false;
+let pronunciationUnlockPromise = null;
 let activePronunciationObjectUrl = '';
 let pronunciationRequestSerial = 0;
 let autoPlaybackBlockedToastShown = false;
+let reviewAudioEnabled = false;
+let normalReviewMode = 'due';
 const dictionaryEntryPromises = new Map();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
@@ -713,6 +717,42 @@ function normalizePronunciationWord(text) {
   return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function getSharedPronunciationAudio() {
+  if (!activePronunciationAudio) {
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.playsInline = true;
+    audio.setAttribute('playsinline', '');
+    audio.setAttribute('webkit-playsinline', '');
+    activePronunciationAudio = audio;
+  }
+  return activePronunciationAudio;
+}
+
+function unlockPronunciationAudio() {
+  if (pronunciationAudioUnlocked) return Promise.resolve(true);
+  if (pronunciationUnlockPromise) return pronunciationUnlockPromise;
+  const audio = getSharedPronunciationAudio();
+  const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+  try {
+    audio.src = silentWav;
+    audio.muted = true;
+    pronunciationUnlockPromise = audio.play().then(() => {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+      pronunciationAudioUnlocked = true;
+      return true;
+    }).catch(() => false).finally(() => {
+      pronunciationUnlockPromise = null;
+    });
+    return pronunciationUnlockPromise;
+  } catch {
+    pronunciationUnlockPromise = null;
+    return Promise.resolve(false);
+  }
+}
+
 function stopPronunciationPlayback() {
   try {
     window.speechSynthesis?.cancel?.();
@@ -722,13 +762,11 @@ function stopPronunciationPlayback() {
   if (activePronunciationAudio) {
     try {
       activePronunciationAudio.pause();
-      activePronunciationAudio.removeAttribute('src');
-      activePronunciationAudio.load?.();
+      activePronunciationAudio.currentTime = 0;
     } catch {
       // Best effort only.
     }
   }
-  activePronunciationAudio = null;
   if (activePronunciationObjectUrl) {
     try { URL.revokeObjectURL(activePronunciationObjectUrl); } catch { /* ignore */ }
     activePronunciationObjectUrl = '';
@@ -874,24 +912,25 @@ async function prepareDictionaryPronunciation(word, locale = state.settings.pron
 
 async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = false }) {
   if (requestId !== pronunciationRequestSerial) return { played: false, stale: true };
-  const audio = new Audio();
-  audio.preload = 'auto';
-  audio.playsInline = true;
-  if (blob) {
-    activePronunciationObjectUrl = URL.createObjectURL(blob);
-    audio.src = activePronunciationObjectUrl;
-  } else {
-    audio.src = audioUrl;
-  }
-  activePronunciationAudio = audio;
+  const audio = getSharedPronunciationAudio();
   try {
+    audio.pause();
+    audio.currentTime = 0;
+    audio.muted = false;
+    if (blob) {
+      activePronunciationObjectUrl = URL.createObjectURL(blob);
+      audio.src = activePronunciationObjectUrl;
+    } else {
+      audio.src = audioUrl;
+    }
     await audio.play();
+    pronunciationAudioUnlocked = true;
     return { played: true, blocked: false };
   } catch (error) {
     const blocked = error?.name === 'NotAllowedError';
     if (auto && blocked && !autoPlaybackBlockedToastShown) {
       autoPlaybackBlockedToastShown = true;
-      showToast('iPhone 阻止了首次自动播放，请先点一次喇叭');
+      showToast('请先点一次任意喇叭，之后复习可自动发音');
     }
     return { played: false, blocked, error };
   }
@@ -899,25 +938,37 @@ async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = fal
 
 function speakWithSystemVoice(text, { auto = false } = {}) {
   const value = String(text || '').trim();
-  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
-    if (!auto) showToast('当前浏览器不支持发音');
-    return false;
-  }
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(value);
-    utterance.lang = state.settings.pronunciationLocale || 'en-US';
-    utterance.rate = 0.88;
-    const voices = window.speechSynthesis.getVoices?.() || [];
-    const exact = voices.find(voice => voice.lang === utterance.lang);
-    const languageMatch = voices.find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()));
-    if (exact || languageMatch) utterance.voice = exact || languageMatch;
-    window.speechSynthesis.speak(utterance);
-    return true;
-  } catch {
-    if (!auto) showToast('系统备用发音失败');
-    return false;
-  }
+  return new Promise(resolve => {
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      if (!auto) showToast('当前浏览器不支持系统发音');
+      resolve(false);
+      return;
+    }
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(value);
+      utterance.lang = state.settings.pronunciationLocale || 'en-US';
+      utterance.rate = 0.88;
+      const voices = window.speechSynthesis.getVoices?.() || [];
+      const exact = voices.find(voice => voice.lang === utterance.lang);
+      const languageMatch = voices.find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()));
+      if (exact || languageMatch) utterance.voice = exact || languageMatch;
+      let settled = false;
+      const finish = ok => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      utterance.onstart = () => finish(true);
+      utterance.onerror = () => finish(false);
+      const timer = setTimeout(() => finish(false), 1800);
+      window.speechSynthesis.resume?.();
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      resolve(false);
+    }
+  });
 }
 
 async function speakWord(text, options = {}) {
@@ -939,8 +990,8 @@ async function speakWord(text, options = {}) {
     // Use system speech only when the dictionary has no usable audio or the network is unavailable.
   }
   if (requestId !== pronunciationRequestSerial) return false;
-  const usedSystem = speakWithSystemVoice(value, { auto });
-  if (usedSystem && !auto) showToast('未取得词典音频，已使用系统备用发音');
+  const usedSystem = await speakWithSystemVoice(value, { auto });
+  if (!auto) showToast(usedSystem ? '未取得词典音频，已使用系统备用发音' : '发音失败，请检查手机音量或稍后重试');
   return usedSystem;
 }
 
@@ -961,6 +1012,7 @@ function maybeAutoSpeak(word, key) {
   const reviewActive = document.getElementById('review')?.classList.contains('active');
   const wrongActive = document.getElementById('wrongbook')?.classList.contains('active');
   if ((!reviewActive && !wrongActive) || !state.settings.autoPronounce || !word || lastAutoSpokenKey === key) return;
+  if (reviewActive && !reviewAudioEnabled) return;
   lastAutoSpokenKey = key;
   setTimeout(() => speakWord(word, { auto: true }), 80);
 }
@@ -1242,7 +1294,8 @@ function normalizeSettings(rawSettings = {}) {
   const intervals = ensureLongIntervals(Array.isArray(rawSettings.intervals) && rawSettings.intervals.length ? rawSettings.intervals : DEFAULT_INTERVALS);
   const dailyQuota = [5, 10].includes(Number(rawSettings.dailyQuota)) ? Number(rawSettings.dailyQuota) : 5;
   const backlogDailyLimit = [5, 8, 10].includes(Number(rawSettings.backlogDailyLimit)) ? Number(rawSettings.backlogDailyLimit) : 8;
-  const longTermDailyLimit = [3, 5, 8].includes(Number(rawSettings.longTermDailyLimit)) ? Number(rawSettings.longTermDailyLimit) : 5;
+  const parsedNormalBacklogLimit = Number(rawSettings.longTermDailyLimit);
+  const longTermDailyLimit = Number.isFinite(parsedNormalBacklogLimit) ? Math.min(999, Math.max(0, Math.floor(parsedNormalBacklogLimit))) : 10;
   const pronunciationLocale = ['en-US', 'en-GB'].includes(rawSettings.pronunciationLocale) ? rawSettings.pronunciationLocale : 'en-US';
   const pronunciationSettingsVersion = Math.max(0, Number(rawSettings.pronunciationSettingsVersion || 0));
   const autoPronounce = pronunciationSettingsVersion >= PRONUNCIATION_SETTINGS_VERSION
@@ -1440,12 +1493,25 @@ function getWrongBookItems(options = {}) {
     });
 }
 
-function getTodayDueWords(targetDate = todayStr()) {
+function getNormalDueGroups(targetDate = todayStr()) {
   const activeRecoveryIds = getWrongBookIds();
-  return state.words
+  const eligible = state.words
     .filter(word => !activeRecoveryIds.has(word.id))
-    .filter(word => word.nextReviewDate && word.nextReviewDate <= targetDate && !(word.reviewedOnDates || []).includes(targetDate))
-    .sort((a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || '')));
+    .filter(word => word.nextReviewDate && !(word.reviewedOnDates || []).includes(targetDate));
+  const sorter = (a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || ''));
+  return {
+    dueToday: eligible.filter(word => word.nextReviewDate === targetDate).sort(sorter),
+    overdue: eligible.filter(word => word.nextReviewDate < targetDate).sort(sorter),
+  };
+}
+
+function getTodayDueWords(targetDate = todayStr()) {
+  return getNormalDueGroups(targetDate).dueToday;
+}
+
+function getTodayBacklogWords(targetDate = todayStr()) {
+  const limit = Math.max(0, Number(state.settings.longTermDailyLimit || 0));
+  return getNormalDueGroups(targetDate).overdue.slice(0, limit);
 }
 
 function getBatchSummary(targetDate = todayStr()) {
@@ -1672,11 +1738,11 @@ function buildNormalQueue() {
   if (reviewContext.type === 'batch' && reviewContext.sourceDate) {
     return state.words.filter(word => word.createdAt === reviewContext.sourceDate).sort((a, b) => a.word.localeCompare(b.word));
   }
-  return getTodayDueWords(todayStr());
+  return normalReviewMode === 'backlog' ? getTodayBacklogWords(todayStr()) : getTodayDueWords(todayStr());
 }
 
 function getReviewContextKey() {
-  return reviewContext.type === 'batch' && reviewContext.sourceDate ? `batch:${reviewContext.sourceDate}` : 'today';
+  return reviewContext.type === 'batch' && reviewContext.sourceDate ? `batch:${reviewContext.sourceDate}` : `today:${normalReviewMode}`;
 }
 
 function startNormalReviewSession() {
@@ -1782,7 +1848,10 @@ function getSessionBatch(session) {
 
 function renderDashboard() {
   const today = todayStr();
-  const dueWords = getTodayDueWords(today);
+  const normalGroups = getNormalDueGroups(today);
+  const dueWords = normalGroups.dueToday;
+  const overdueNormal = normalGroups.overdue;
+  const releasedNormalBacklog = getTodayBacklogWords(today);
   const dueRecovery = getWrongBookItems({ dueOnly: true });
   const activeWrong = getWrongBookItems();
   const newCount = state.words.filter(word => word.createdAt === today).length;
@@ -1798,7 +1867,8 @@ function renderDashboard() {
   document.getElementById('totalWordCount').textContent = state.words.length;
   document.getElementById('todayPlan').innerHTML = `
     <p>先完成薄弱词恢复 <strong>${dueRecovery.length}</strong> 个（近期 Hard / Again：${recentDue}；历史积压释放：${backlogDue}）。</p>
-    <p>再完成正常到期复习 <strong>${dueWords.length}</strong> 个。</p>
+    <p>再完成今日正常到期 <strong>${dueWords.length}</strong> 个。</p>
+    <p>完成今日到期后，可继续恢复历史积压 <strong>${releasedNormalBacklog.length}</strong> 个（积压总数：${overdueNormal.length}；每日释放上限：${state.settings.longTermDailyLimit}）。</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
     ${futureBacklog ? `<p class="small muted">仍有 ${futureBacklog} 个历史积压词已安排在后续日期逐步释放。</p>` : ''}
   `;
@@ -1816,13 +1886,14 @@ function renderReview() {
   const summary = document.getElementById('reviewSummary');
   const done = document.getElementById('reviewDone');
   const box = document.getElementById('reviewBox');
+  const audioStartBox = document.getElementById('reviewAudioStartBox');
 
   if (reviewContext.type === 'batch' && reviewContext.sourceDate) {
     title.textContent = `${reviewContext.sourceDate} 批次复习`;
     banner.textContent = `当前来自日历：${reviewContext.sourceDate} 批次。`;
     banner.classList.remove('hidden');
   } else {
-    title.textContent = '普通复习';
+    title.textContent = normalReviewMode === 'backlog' ? '历史积压恢复' : '今日到期复习';
     banner.classList.add('hidden');
     banner.textContent = '';
   }
@@ -1830,24 +1901,71 @@ function renderReview() {
   const session = reviewSession;
   const { queue, batches, batch, item } = getSessionBatch(session);
   if (session.completed) {
-    done.textContent = '当前正常复习已完成。';
-    done.classList.remove('hidden');
     box.classList.add('hidden');
     summary.classList.add('hidden');
+    audioStartBox.classList.add('hidden');
+    if (reviewContext.type === 'today' && normalReviewMode === 'due') {
+      const backlogCount = getTodayBacklogWords(todayStr()).length;
+      done.innerHTML = backlogCount
+        ? `今日到期单词已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startBacklogReviewBtn">继续恢复积压 ${backlogCount} 个</button><button class="btn" id="finishTodayReviewBtn">今天结束</button></div>`
+        : '今日到期单词已完成，当前没有可释放的历史积压词。';
+      done.classList.remove('hidden');
+      document.getElementById('startBacklogReviewBtn')?.addEventListener('click', () => {
+        normalReviewMode = 'backlog';
+        resetNormalReviewSession();
+        lastAutoSpokenKey = '';
+        renderReview();
+      });
+      document.getElementById('finishTodayReviewBtn')?.addEventListener('click', () => switchTab('today'));
+    } else {
+      done.textContent = normalReviewMode === 'backlog' ? '今日历史积压恢复已完成。' : '当前正常复习已完成。';
+      done.classList.remove('hidden');
+    }
     return;
   }
 
   done.classList.add('hidden');
   if (queue.length === 0 || !item) {
     box.classList.add('hidden');
+    audioStartBox.classList.add('hidden');
     summary.classList.remove('hidden');
-    summary.textContent = '当前没有正常到期词。';
+    if (reviewContext.type === 'today' && normalReviewMode === 'due') {
+      const backlogCount = getTodayBacklogWords(todayStr()).length;
+      summary.innerHTML = backlogCount
+        ? `今天没有新到期词。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startBacklogWithoutDueBtn">恢复历史积压 ${backlogCount} 个</button></div>`
+        : '今天没有正常到期词，也没有可释放的历史积压词。';
+      document.getElementById('startBacklogWithoutDueBtn')?.addEventListener('click', () => {
+        normalReviewMode = 'backlog';
+        resetNormalReviewSession();
+        lastAutoSpokenKey = '';
+        renderReview();
+      });
+    } else {
+      summary.textContent = normalReviewMode === 'backlog' ? '今天没有可释放的历史积压词。' : '当前没有正常到期词。';
+    }
     return;
   }
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `${session.remedialRound ? `当天补救第 ${session.remedialRound} 轮 · ` : ''}小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `${normalReviewMode === 'backlog' && reviewContext.type === 'today' ? '历史积压 · ' : ''}${session.remedialRound ? `当天补救第 ${session.remedialRound} 轮 · ` : ''}小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  const needsAudioStart = reviewContext.type === 'today' && state.settings.autoPronounce && !reviewAudioEnabled;
+  audioStartBox.classList.toggle('hidden', !needsAudioStart);
+  if (needsAudioStart) {
+    box.classList.add('hidden');
+    audioStartBox.innerHTML = '<button class="btn primary" id="enableReviewAudioBtn">开始复习并启用发音</button><div class="small muted" style="margin-top:8px;">iPhone 只需点击一次，之后英文→中文会自动发音。</div>';
+    document.getElementById('enableReviewAudioBtn').onclick = async () => {
+      const unlocked = await unlockPronunciationAudio();
+      reviewAudioEnabled = true;
+      autoPlaybackBlockedToastShown = false;
+      lastAutoSpokenKey = '';
+      if (!unlocked) showToast('已尝试启用发音；若仍无声，请检查静音键和媒体音量');
+      await speakWord(item.word, { auto: false });
+      renderReview();
+    };
+    return;
+  }
+  box.classList.remove('hidden');
 
   const modeText = document.getElementById('reviewModeText');
   const prompt = document.getElementById('reviewPrompt');
@@ -1875,7 +1993,7 @@ function renderReview() {
   if (session.phase === 2) input.value = session.inputValue;
 
   speakBtn.classList.toggle('hidden', session.phase !== 1 && !session.showAnswer);
-  speakBtn.onclick = () => speakWord(item.word);
+  speakBtn.onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
   if (session.phase === 1) {
     maybeAutoSpeak(item.word, `normal:${item.id}:${session.batchIndex}:${session.remedialRound}:${session.phase}:${session.wordIndex}`);
   } else if (!session.showAnswer) {
@@ -2141,11 +2259,11 @@ function renderWrongBook() {
 
   if (session.showAnswer) {
     const answerSpeakBtn = document.getElementById('wrongbookAnswerSpeakBtn');
-    if (answerSpeakBtn) answerSpeakBtn.onclick = () => speakWord(item.word);
+    if (answerSpeakBtn) answerSpeakBtn.onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
   }
 
   if (session.phase === 1) {
-    document.getElementById('wrongbookSpeakBtn').onclick = () => speakWord(item.word);
+    document.getElementById('wrongbookSpeakBtn').onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
     maybeAutoSpeak(item.word, `wrong:${item.id}:${session.remedialRound}:${session.batchIndex}:${session.phase}:${session.wordIndex}`);
   } else {
     if (!session.showAnswer) stopPronunciationPlayback();
@@ -2429,7 +2547,7 @@ function attachWordCardEvents(container) {
     const editBtn = card.querySelector('[data-action="edit"]');
     const deleteBtn = card.querySelector('[data-action="delete"]');
     const speakBtn = card.querySelector('[data-action="speak"]');
-    if (speakBtn) speakBtn.onclick = (e) => { e.stopPropagation(); speakWord(word.word); };
+    if (speakBtn) speakBtn.onclick = (e) => { e.stopPropagation(); unlockPronunciationAudio(); speakWord(word.word); };
     if (editBtn) editBtn.onclick = (e) => { e.stopPropagation(); activeSwipeCard = null; openEditModal(word.id); };
     if (deleteBtn) deleteBtn.onclick = async (e) => {
       e.stopPropagation();
@@ -2612,11 +2730,20 @@ function renderSettings() {
 }
 
 function switchTab(tabId) {
+  const wasReviewActive = document.getElementById('review')?.classList.contains('active');
   if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
+  if (tabId === 'review' && !wasReviewActive && reviewContext.type === 'today') {
+    normalReviewMode = 'due';
+    resetNormalReviewSession();
+    lastAutoSpokenKey = '';
+  }
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById(tabId).classList.add('active');
   document.querySelectorAll('.bottom-nav button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
-  if (tabId === 'review') renderReview();
+  if (tabId === 'review') {
+    if (reviewContext.type === 'today' && !reviewSession) normalReviewMode = 'due';
+    renderReview();
+  }
   if (tabId === 'calendarTab') renderCalendar();
   if (tabId === 'library') renderLibrary();
   if (tabId === 'wrongbook') renderWrongBook();
@@ -2780,7 +2907,7 @@ function bindEvents() {
     meaningInputEl.addEventListener('input', () => autoResizeTextarea(meaningInputEl));
     autoResizeTextarea(meaningInputEl);
   }
-  document.getElementById('speakAddWordBtn').addEventListener('click', () => speakWord(document.getElementById('wordInput').value));
+  document.getElementById('speakAddWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('wordInput').value); });
   document.getElementById('generateExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'wordInput',
     meaningInputId: 'meaningInput',
@@ -2824,7 +2951,7 @@ function bindEvents() {
     calendarMeaningInputEl.addEventListener('input', () => autoResizeTextarea(calendarMeaningInputEl));
     autoResizeTextarea(calendarMeaningInputEl);
   }
-  document.getElementById('speakCalendarWordBtn').addEventListener('click', () => speakWord(document.getElementById('calendarWordInput').value));
+  document.getElementById('speakCalendarWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('calendarWordInput').value); });
   document.getElementById('generateCalendarExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'calendarWordInput',
     meaningInputId: 'calendarMeaningInput',
@@ -2835,7 +2962,7 @@ function bindEvents() {
 
   const editMeaningInputEl = document.getElementById('editMeaningInput');
   if (editMeaningInputEl) editMeaningInputEl.addEventListener('input', () => autoResizeTextarea(editMeaningInputEl));
-  document.getElementById('speakEditWordBtn').addEventListener('click', () => speakWord(document.getElementById('editWordInput').value));
+  document.getElementById('speakEditWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('editWordInput').value); });
   document.getElementById('generateEditExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'editWordInput',
     meaningInputId: 'editMeaningInput',
@@ -2908,7 +3035,7 @@ function bindEvents() {
     state.settings.batchSize = dailyQuota;
     state.settings.intervals = nextIntervals;
     state.settings.backlogDailyLimit = Number(document.getElementById('backlogDailyLimitSelect').value) || 8;
-    state.settings.longTermDailyLimit = Number(document.getElementById('longTermDailyLimitSelect').value) || 5;
+    state.settings.longTermDailyLimit = Math.min(999, Math.max(0, Number(document.getElementById('longTermDailyLimitSelect').value) || 0));
     state.settings.pronunciationLocale = document.getElementById('pronunciationLocaleSelect').value || 'en-US';
     state.settings.autoPronounce = document.getElementById('autoPronounceCheckbox').checked;
     state.settings.cachePronunciationOnAdd = document.getElementById('cachePronunciationOnAddCheckbox').checked;
@@ -2919,7 +3046,7 @@ function bindEvents() {
     });
     reschedulePendingLegacyBacklog();
     reschedulePendingNormalCatchup();
-    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史错词每天 ${state.settings.backlogDailyLimit} 个。`;
+    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史错词每天 ${state.settings.backlogDailyLimit} 个；正常积压每天最多 ${state.settings.longTermDailyLimit} 个。`;
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
@@ -3050,7 +3177,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.7.1');
+      await navigator.serviceWorker.register('./sw.js?v=5.8');
     } catch {
       // ignore
     }
