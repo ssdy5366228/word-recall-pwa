@@ -1,8 +1,8 @@
-Word Recall v6.0 Beta
+Word Recall v6.0 Beta 2
 
-本测试版只重构复习调度：今日到期、历史积压错词、长期巩固、当日 Again 循环、Hard/Again 薄弱词恢复。其他功能沿用 v5.8.2。
+本测试版只重构复习调度：今日到期、历史积压错词、长期巩固、当日 Again 循环、Hard/Again 薄弱词恢复。其他功能沿用 v6.0 Beta 2。
 
-Word Recall v6.0 Beta
+Word Recall v6.0 Beta 2
 
 本次升级：
 1. iPhone 复习发音授权
@@ -29,7 +29,7 @@ Word Recall v6.0 Beta
 将本文件夹内的 index.html、app.js、styles.css、sw.js、manifest.webmanifest 和图标文件全部覆盖到 GitHub Pages 仓库根目录。
 
 
-v6.0 Beta 调度测试：
+v6.0 Beta 2 调度测试：
 - “今日到期”只包含 nextReviewDate 等于今天的单词。
 - nextReviewDate 早于今天的单词全部归入“历史积压”，不再一次性塞入今日任务。
 - 历史积压在今日到期完成后再进入，并受“每日正常复习积压释放数量”限制。

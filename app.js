@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta';
-const APP_VERSION_NUMBER = '6.0.0-beta';
+const APP_VERSION = 'v6.0 Beta 2';
+const APP_VERSION_NUMBER = '6.0.0-beta.2';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -1549,12 +1549,43 @@ function getTodayLongTermWords(targetDate = todayStr()) {
 }
 
 function getBatchSummary(targetDate = todayStr()) {
-  const counts = new Map();
-  getTodayDueWords(targetDate).forEach(word => {
-    const info = getCoreDueInfo(word, targetDate);
-    if (info) counts.set(info.interval, (counts.get(info.interval) || 0) + 1);
-  });
-  return getCoreIntervals().map(interval => ({ interval, count: counts.get(interval) || 0 })).filter(item => item.count > 0);
+  const dueWords = getTodayDueWords(targetDate);
+  const sessionIsCurrent = reviewSession
+    && reviewSession.contextKey === 'today:due'
+    && !reviewSession.completed;
+  return getCoreIntervals().map(interval => {
+    const sourceDate = addDays(targetDate, -interval);
+    const words = dueWords.filter(word => {
+      const info = getCoreDueInfo(word, targetDate);
+      return info && info.interval === interval;
+    });
+    if (!words.length) return null;
+    let phase1Done = 0;
+    let phase2Done = 0;
+    if (sessionIsCurrent) {
+      words.forEach(word => {
+        const result = reviewSession.roundRatings?.[word.id] || {};
+        if (result.phase1) phase1Done += 1;
+        if (result.phase2) phase2Done += 1;
+      });
+    }
+    return {
+      interval,
+      sourceDate,
+      count: words.length,
+      phase1Done,
+      phase2Done,
+      phase1Remaining: Math.max(0, words.length - phase1Done),
+      phase2Remaining: Math.max(0, words.length - phase2Done),
+    };
+  }).filter(Boolean);
+}
+
+function getPlannedCoreReviewCount(targetDate) {
+  return getCoreIntervals().reduce((total, interval) => {
+    const sourceDate = addDays(targetDate, -interval);
+    return total + state.words.filter(word => word.createdAt === sourceDate).length;
+  }, 0);
 }
 
 function escapeHtml(str) {
@@ -1900,8 +1931,14 @@ function renderDashboard() {
     <p>⑤ Hard / Again 薄弱词恢复：今日 <strong>${recentDue}</strong> 个。</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
   `;
+  const duePhase1Done = batchSummary.reduce((sum, item) => sum + item.phase1Done, 0);
+  const duePhase2Done = batchSummary.reduce((sum, item) => sum + item.phase2Done, 0);
   document.getElementById('batchSummary').innerHTML = batchSummary.length
-    ? batchSummary.map(item => `<p>${item.interval} 天阶段：<strong>${item.count}</strong> 个</p>`).join('')
+    ? `<p><strong>整体进度：</strong>英→中 ${duePhase1Done}/${dueWords.length}；中→英 ${duePhase2Done}/${dueWords.length}</p>`
+      + batchSummary.map(item => `
+        <p>${item.interval} 天前批次｜${item.sourceDate} 新增：共 <strong>${item.count}</strong> 个；
+        英→中剩余 <strong>${item.phase1Remaining}</strong>；中→英剩余 <strong>${item.phase2Remaining}</strong></p>
+      `).join('')
     : '<p class="muted">今天没有 0–30 天阶段真正到期的单词。</p>';
   document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
 }
@@ -1976,7 +2013,8 @@ function renderReview() {
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `${normalReviewMode === 'longterm' && reviewContext.type === 'today' ? '长期巩固 · ' : ''}${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length} · 总词数 ${session.currentPoolIds.length}`;
+  const overallIndex = Math.min(session.batchIndex * session.batchSize + session.wordIndex + 1, session.currentPoolIds.length);
+  summary.textContent = `${normalReviewMode === 'longterm' && reviewContext.type === 'today' ? '长期巩固 · ' : ''}${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 总进度 ${overallIndex}/${session.currentPoolIds.length} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 批内 ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
   const needsAudioStart = reviewContext.type === 'today' && state.settings.autoPronounce && !reviewAudioEnabled;
   audioStartBox.classList.toggle('hidden', !needsAudioStart);
   if (needsAudioStart) {
@@ -2016,7 +2054,9 @@ function renderReview() {
 
   modeText.textContent = session.phase === 1 ? '第一轮：英文 → 中文，先主动回忆目标义项' : '第二轮：中文 → 英文，输入英文拼写';
   prompt.textContent = session.phase === 1 ? item.word : item.meaning;
-  meta.textContent = `标签：${(item.tags || []).join(' / ') || '无'} ｜ 下次正常计划：${item.nextReviewDate || '未设置'}`;
+  const dueInfo = reviewContext.type === 'today' && normalReviewMode === 'due' ? getCoreDueInfo(item, todayStr()) : null;
+  const sourceLabel = dueInfo ? `${dueInfo.interval} 天阶段｜${item.createdAt} 新增批次｜今日到期` : (normalReviewMode === 'longterm' ? `长期巩固｜${item.nextReviewDate || '到期日未设置'}` : `${item.createdAt || '日期未知'} 新增批次`);
+  meta.textContent = `${sourceLabel} ｜ 标签：${(item.tags || []).join(' / ') || '无'}`;
   inputWrap.classList.toggle('hidden', session.phase !== 2);
   if (session.phase === 2) input.value = session.inputValue;
 
@@ -2443,7 +2483,7 @@ function renderCalendar() {
   for (let day = 1; day <= daysInMonth; day++) {
     const ds = formatDate(new Date(year, month, day));
     const created = state.words.filter(word => word.createdAt === ds).length;
-    const due = state.words.filter(word => !activeRecoveryIds.has(word.id) && word.nextReviewDate === ds).length;
+    const due = getPlannedCoreReviewCount(ds);
     grid.insertAdjacentHTML('beforeend', `
       <button class="day ${selectedDate === ds ? 'selected' : ''}" data-date="${ds}">
         <div class="date">${day}</div>
@@ -2755,9 +2795,8 @@ function renderSettings() {
 function switchTab(tabId) {
   const wasReviewActive = document.getElementById('review')?.classList.contains('active');
   if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
-  if (tabId === 'review' && !wasReviewActive && reviewContext.type === 'today') {
+  if (tabId === 'review' && !wasReviewActive && reviewContext.type === 'today' && !reviewSession) {
     normalReviewMode = 'due';
-    resetNormalReviewSession();
     lastAutoSpokenKey = '';
   }
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
