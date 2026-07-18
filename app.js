@@ -1,5 +1,5 @@
-const APP_VERSION = 'v5.8';
-const APP_VERSION_NUMBER = '5.8.0';
+const APP_VERSION = 'v5.8.1';
+const APP_VERSION_NUMBER = '5.8.1';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -1495,13 +1495,37 @@ function getWrongBookItems(options = {}) {
 
 function getNormalDueGroups(targetDate = todayStr()) {
   const activeRecoveryIds = getWrongBookIds();
+  const intervals = state.settings.intervals || DEFAULT_INTERVALS;
+  const coreStageLastIndex = Math.max(0, intervals.findLastIndex(interval => Number(interval) <= 30));
   const eligible = state.words
     .filter(word => !activeRecoveryIds.has(word.id))
     .filter(word => word.nextReviewDate && !(word.reviewedOnDates || []).includes(targetDate));
   const sorter = (a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || ''));
+
+  const dueToday = [];
+  const overdue = [];
+  eligible.forEach(word => {
+    const stage = Math.min(Math.max(0, Number(word.scheduleStage ?? word.stageIndex ?? 0)), intervals.length - 1);
+    const dueDate = String(word.nextReviewDate || '');
+    const isCoreNormalStage = stage <= coreStageLastIndex;
+
+    // 0/1/3/7/14/21/30 天阶段即使逾期，仍属于正常复习，不能被每日积压上限截断。
+    if (isCoreNormalStage && dueDate <= targetDate) {
+      dueToday.push(word);
+      return;
+    }
+
+    // 60/90/180 天属于长期巩固：当天到期正常复习，错过后才进入限量释放的历史积压。
+    if (!isCoreNormalStage && dueDate === targetDate) {
+      dueToday.push(word);
+      return;
+    }
+    if (!isCoreNormalStage && dueDate < targetDate) overdue.push(word);
+  });
+
   return {
-    dueToday: eligible.filter(word => word.nextReviewDate === targetDate).sort(sorter),
-    overdue: eligible.filter(word => word.nextReviewDate < targetDate).sort(sorter),
+    dueToday: dueToday.sort(sorter),
+    overdue: overdue.sort(sorter),
   };
 }
 
@@ -1868,7 +1892,7 @@ function renderDashboard() {
   document.getElementById('todayPlan').innerHTML = `
     <p>先完成薄弱词恢复 <strong>${dueRecovery.length}</strong> 个（近期 Hard / Again：${recentDue}；历史积压释放：${backlogDue}）。</p>
     <p>再完成今日正常到期 <strong>${dueWords.length}</strong> 个。</p>
-    <p>完成今日到期后，可继续恢复历史积压 <strong>${releasedNormalBacklog.length}</strong> 个（积压总数：${overdueNormal.length}；每日释放上限：${state.settings.longTermDailyLimit}）。</p>
+    <p>完成正常复习后，可继续恢复长期巩固阶段（60/90/180天）的历史积压 <strong>${releasedNormalBacklog.length}</strong> 个（长期积压总数：${overdueNormal.length}；每日释放上限：${state.settings.longTermDailyLimit}）。</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
     ${futureBacklog ? `<p class="small muted">仍有 ${futureBacklog} 个历史积压词已安排在后续日期逐步释放。</p>` : ''}
   `;
@@ -3177,7 +3201,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.8');
+      await navigator.serviceWorker.register('./sw.js?v=5.8.1');
     } catch {
       // ignore
     }

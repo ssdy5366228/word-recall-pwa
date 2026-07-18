@@ -1,4 +1,4 @@
-Word Recall v5.8
+Word Recall v5.8.1
 
 本次升级：
 1. iPhone 复习发音授权
@@ -23,3 +23,9 @@ Word Recall v5.8
 
 部署：
 将本文件夹内的 index.html、app.js、styles.css、sw.js、manifest.webmanifest 和图标文件全部覆盖到 GitHub Pages 仓库根目录。
+
+
+v5.8.1 修正：
+- 0/1/3/7/14/21/30 天阶段即使逾期，仍全部进入正常复习。
+- 60/90/180 天为长期巩固阶段；当天到期正常复习，错过后才按每日设置限量释放。
+- 不修改词库、历史评分、薄弱词或现有复习进度。
