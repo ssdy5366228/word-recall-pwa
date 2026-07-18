@@ -1,5 +1,5 @@
-const APP_VERSION = 'v5.8.2';
-const APP_VERSION_NUMBER = '5.8.2';
+const APP_VERSION = 'v6.0 Beta';
+const APP_VERSION_NUMBER = '6.0.0-beta';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -69,7 +69,7 @@ let activePronunciationObjectUrl = '';
 let pronunciationRequestSerial = 0;
 let autoPlaybackBlockedToastShown = false;
 let reviewAudioEnabled = false;
-let normalReviewMode = 'due';
+let normalReviewMode = 'due'; // due | longterm
 const dictionaryEntryPromises = new Map();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
@@ -1493,52 +1493,68 @@ function getWrongBookItems(options = {}) {
     });
 }
 
-function getNormalDueGroups(targetDate = todayStr()) {
+function dateDiffDays(fromDate, toDate) {
+  const from = new Date(`${fromDate}T00:00:00`);
+  const to = new Date(`${toDate}T00:00:00`);
+  return Math.round((to - from) / 86400000);
+}
+
+function getCoreIntervals() {
+  return state.settings.intervals.filter(day => day <= 30);
+}
+
+function getLongTermIntervals() {
+  return state.settings.intervals.filter(day => day > 30);
+}
+
+function getCoreDueInfo(word, targetDate = todayStr()) {
+  const age = dateDiffDays(word.createdAt || targetDate, targetDate);
+  const interval = getCoreIntervals().find(day => day === age);
+  if (interval == null) return null;
+  if ((word.reviewedOnDates || []).includes(targetDate)) return null;
+  return { interval, stageIndex: state.settings.intervals.indexOf(interval) };
+}
+
+function getNormalQueueGroups(targetDate = todayStr()) {
   const activeRecoveryIds = getWrongBookIds();
-  const eligible = state.words
-    .filter(word => !activeRecoveryIds.has(word.id))
-    .filter(word => word.nextReviewDate && !(word.reviewedOnDates || []).includes(targetDate));
-  const sorter = (a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || ''));
+  const sorter = (a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || ''));
+  const coreDue = [];
+  const longTermDue = [];
 
-  const dueToday = [];
-  const overdue = [];
-  eligible.forEach(word => {
-    const dueDate = String(word.nextReviewDate || '');
-
-    // 只有计划日期恰好是今天的词，才进入“今日到期”。
-    if (dueDate === targetDate) {
-      dueToday.push(word);
+  state.words.forEach(word => {
+    if (activeRecoveryIds.has(word.id)) return;
+    const coreInfo = getCoreDueInfo(word, targetDate);
+    if (coreInfo) {
+      coreDue.push(word);
       return;
     }
-
-    // 所有已经错过计划日期的正常复习词，无论当前处于 0–30 天阶段
-    // 还是 60/90/180 天长期阶段，都进入历史积压，并按每日设置限量释放。
-    if (dueDate < targetDate) overdue.push(word);
+    const stage = Math.min(Number(word.scheduleStage || 0), state.settings.intervals.length - 1);
+    const interval = state.settings.intervals[stage] ?? 0;
+    if (interval > 30 && word.nextReviewDate && word.nextReviewDate <= targetDate && !(word.reviewedOnDates || []).includes(targetDate)) {
+      longTermDue.push(word);
+    }
   });
 
-  return {
-    dueToday: dueToday.sort(sorter),
-    overdue: overdue.sort(sorter),
-  };
+  return { coreDue: coreDue.sort(sorter), longTermDue: longTermDue.sort((a, b) => String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || '')) || sorter(a, b)) };
 }
 
 function getTodayDueWords(targetDate = todayStr()) {
-  return getNormalDueGroups(targetDate).dueToday;
+  return getNormalQueueGroups(targetDate).coreDue;
 }
 
-function getTodayBacklogWords(targetDate = todayStr()) {
+function getTodayLongTermWords(targetDate = todayStr()) {
   const limit = Math.max(0, Number(state.settings.longTermDailyLimit || 0));
-  return getNormalDueGroups(targetDate).overdue.slice(0, limit);
+  const words = getNormalQueueGroups(targetDate).longTermDue;
+  return limit === 0 ? [] : words.slice(0, limit);
 }
 
 function getBatchSummary(targetDate = todayStr()) {
   const counts = new Map();
   getTodayDueWords(targetDate).forEach(word => {
-    const stage = Math.min(Number(word.scheduleStage || 0), state.settings.intervals.length - 1);
-    const interval = state.settings.intervals[stage] ?? state.settings.intervals.at(-1) ?? 0;
-    counts.set(interval, (counts.get(interval) || 0) + 1);
+    const info = getCoreDueInfo(word, targetDate);
+    if (info) counts.set(info.interval, (counts.get(info.interval) || 0) + 1);
   });
-  return state.settings.intervals.map(interval => ({ interval, count: counts.get(interval) || 0 })).filter(item => item.count > 0);
+  return getCoreIntervals().map(interval => ({ interval, count: counts.get(interval) || 0 })).filter(item => item.count > 0);
 }
 
 function escapeHtml(str) {
@@ -1755,7 +1771,7 @@ function buildNormalQueue() {
   if (reviewContext.type === 'batch' && reviewContext.sourceDate) {
     return state.words.filter(word => word.createdAt === reviewContext.sourceDate).sort((a, b) => a.word.localeCompare(b.word));
   }
-  return normalReviewMode === 'backlog' ? getTodayBacklogWords(todayStr()) : getTodayDueWords(todayStr());
+  return normalReviewMode === 'longterm' ? getTodayLongTermWords(todayStr()) : getTodayDueWords(todayStr());
 }
 
 function getReviewContextKey() {
@@ -1764,11 +1780,12 @@ function getReviewContextKey() {
 
 function startNormalReviewSession() {
   const queue = buildNormalQueue();
-  const baseBatches = chunk(queue.map(w => w.id), getBatchSize());
+  const orderedIds = shuffleArray(queue.map(w => w.id));
   reviewSession = {
     type: 'normal',
     contextKey: getReviewContextKey(),
     queueIds: queue.map(w => w.id),
+    orderedIds,
     batchSize: getBatchSize(),
     batchIndex: 0,
     phase: 1,
@@ -1778,9 +1795,8 @@ function startNormalReviewSession() {
     selectedRating: '',
     completed: false,
     roundRatings: {},
-    batchOrders: {},
     autoAgainReady: false,
-    currentPoolIds: baseBatches[0] || [],
+    currentPoolIds: orderedIds.slice(),
     remedialRound: 0,
     usedHint: false,
     forcedAgain: false,
@@ -1851,31 +1867,25 @@ function getSessionBatch(session) {
   }
 
   const queue = session.queueIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
-  const baseBatches = chunk(queue.map(word => word.id), session.batchSize);
-  if (!Array.isArray(session.currentPoolIds)) session.currentPoolIds = baseBatches[session.batchIndex] || [];
-  const poolWords = session.currentPoolIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
-  const orderKey = `${session.batchIndex}_${session.remedialRound || 0}_${session.currentPoolIds.join('|')}`;
-  session.batchOrders = session.batchOrders || {};
-  if (!session.batchOrders[orderKey]) {
-    session.batchOrders[orderKey] = shuffleArray(poolWords.map(word => word.id));
-  }
-  const batch = session.batchOrders[orderKey].map(id => poolWords.find(word => word.id === id)).filter(Boolean);
-  return { queue, batches: baseBatches, batch, item: batch[session.wordIndex] || null, baseBatches };
+  const poolIds = Array.isArray(session.currentPoolIds) ? session.currentPoolIds : (session.orderedIds || session.queueIds);
+  const poolWords = poolIds.map(id => state.words.find(word => word.id === id)).filter(Boolean);
+  const batches = chunk(poolWords, session.batchSize);
+  const batch = batches[session.batchIndex] || [];
+  return { queue, batches, batch, item: batch[session.wordIndex] || null, baseBatches: batches };
 }
 
 function renderDashboard() {
   const today = todayStr();
-  const normalGroups = getNormalDueGroups(today);
-  const dueWords = normalGroups.dueToday;
-  const overdueNormal = normalGroups.overdue;
-  const releasedNormalBacklog = getTodayBacklogWords(today);
+  const groups = getNormalQueueGroups(today);
+  const dueWords = groups.coreDue;
+  const longTermAll = groups.longTermDue;
+  const longTermReleased = getTodayLongTermWords(today);
   const dueRecovery = getWrongBookItems({ dueOnly: true });
   const activeWrong = getWrongBookItems();
+  const recentDue = dueRecovery.filter(item => item.source === 'recent').length;
+  const legacyDue = dueRecovery.filter(item => item.source !== 'recent').length;
   const newCount = state.words.filter(word => word.createdAt === today).length;
   const batchSummary = getBatchSummary(today);
-  const recentDue = dueRecovery.filter(item => item.source === 'recent').length;
-  const backlogDue = dueRecovery.filter(item => item.source !== 'recent').length;
-  const futureBacklog = activeWrong.filter(item => item.source === 'legacyBacklog' && item.nextReviewDate > today).length;
 
   document.getElementById('todayDueCount').textContent = dueWords.length;
   document.getElementById('todayRecoveryCount').textContent = dueRecovery.length;
@@ -1883,15 +1893,16 @@ function renderDashboard() {
   document.getElementById('wrongWordCount').textContent = activeWrong.length;
   document.getElementById('totalWordCount').textContent = state.words.length;
   document.getElementById('todayPlan').innerHTML = `
-    <p>先完成薄弱词恢复 <strong>${dueRecovery.length}</strong> 个（近期 Hard / Again：${recentDue}；历史积压释放：${backlogDue}）。</p>
-    <p>再完成今日正常到期 <strong>${dueWords.length}</strong> 个。</p>
-    <p>完成今日到期复习后，可继续恢复正常复习历史积压 <strong>${releasedNormalBacklog.length}</strong> 个（历史积压总数：${overdueNormal.length}；每日释放上限：${state.settings.longTermDailyLimit}）。</p>
+    <p>① 今日到期（0/1/3/7/14/21/30 天）：<strong>${dueWords.length}</strong> 个。</p>
+    <p>② 历史积压错词：今日释放 <strong>${legacyDue}</strong> 个。</p>
+    <p>③ 长期巩固（60/90/180 天）：今日可复习 <strong>${longTermReleased.length}</strong> 个${longTermAll.length > longTermReleased.length ? `（待巩固共 ${longTermAll.length} 个）` : ''}。</p>
+    <p>④ 当日 Again：在当前复习结束后自动循环，直到当日记住。</p>
+    <p>⑤ Hard / Again 薄弱词恢复：今日 <strong>${recentDue}</strong> 个。</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
-    ${futureBacklog ? `<p class="small muted">仍有 ${futureBacklog} 个历史积压词已安排在后续日期逐步释放。</p>` : ''}
   `;
   document.getElementById('batchSummary').innerHTML = batchSummary.length
     ? batchSummary.map(item => `<p>${item.interval} 天阶段：<strong>${item.count}</strong> 个</p>`).join('')
-    : '<p class="muted">今天没有正常到期词。</p>';
+    : '<p class="muted">今天没有 0–30 天阶段真正到期的单词。</p>';
   document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
 }
 
@@ -1910,7 +1921,7 @@ function renderReview() {
     banner.textContent = `当前来自日历：${reviewContext.sourceDate} 批次。`;
     banner.classList.remove('hidden');
   } else {
-    title.textContent = normalReviewMode === 'backlog' ? '历史积压恢复' : '今日到期复习';
+    title.textContent = normalReviewMode === 'longterm' ? '长期巩固复习' : '今日到期复习';
     banner.classList.add('hidden');
     banner.textContent = '';
   }
@@ -1922,20 +1933,20 @@ function renderReview() {
     summary.classList.add('hidden');
     audioStartBox.classList.add('hidden');
     if (reviewContext.type === 'today' && normalReviewMode === 'due') {
-      const backlogCount = getTodayBacklogWords(todayStr()).length;
-      done.innerHTML = backlogCount
-        ? `今日到期单词已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startBacklogReviewBtn">继续恢复积压 ${backlogCount} 个</button><button class="btn" id="finishTodayReviewBtn">今天结束</button></div>`
-        : '今日到期单词已完成，当前没有可释放的历史积压词。';
+      const longCount = getTodayLongTermWords(todayStr()).length;
+      done.innerHTML = longCount
+        ? `今日到期两轮已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startLongTermReviewBtn">继续长期巩固 ${longCount} 个</button><button class="btn" id="finishTodayReviewBtn">今天结束</button></div>`
+        : '今日到期两轮已完成。';
       done.classList.remove('hidden');
-      document.getElementById('startBacklogReviewBtn')?.addEventListener('click', () => {
-        normalReviewMode = 'backlog';
+      document.getElementById('startLongTermReviewBtn')?.addEventListener('click', () => {
+        normalReviewMode = 'longterm';
         resetNormalReviewSession();
         lastAutoSpokenKey = '';
         renderReview();
       });
       document.getElementById('finishTodayReviewBtn')?.addEventListener('click', () => switchTab('today'));
     } else {
-      done.textContent = normalReviewMode === 'backlog' ? '今日历史积压恢复已完成。' : '当前正常复习已完成。';
+      done.textContent = normalReviewMode === 'longterm' ? '今日长期巩固已完成。' : '当前复习已完成。';
       done.classList.remove('hidden');
     }
     return;
@@ -1947,25 +1958,25 @@ function renderReview() {
     audioStartBox.classList.add('hidden');
     summary.classList.remove('hidden');
     if (reviewContext.type === 'today' && normalReviewMode === 'due') {
-      const backlogCount = getTodayBacklogWords(todayStr()).length;
-      summary.innerHTML = backlogCount
-        ? `今天没有新到期词。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startBacklogWithoutDueBtn">恢复历史积压 ${backlogCount} 个</button></div>`
-        : '今天没有正常到期词，也没有可释放的历史积压词。';
-      document.getElementById('startBacklogWithoutDueBtn')?.addEventListener('click', () => {
-        normalReviewMode = 'backlog';
+      const longCount = getTodayLongTermWords(todayStr()).length;
+      summary.innerHTML = longCount
+        ? `今天没有 0–30 天阶段到期词。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startLongTermWithoutDueBtn">开始长期巩固 ${longCount} 个</button></div>`
+        : '今天没有 0–30 天阶段到期词。';
+      document.getElementById('startLongTermWithoutDueBtn')?.addEventListener('click', () => {
+        normalReviewMode = 'longterm';
         resetNormalReviewSession();
         lastAutoSpokenKey = '';
         renderReview();
       });
     } else {
-      summary.textContent = normalReviewMode === 'backlog' ? '今天没有可释放的历史积压词。' : '当前没有正常到期词。';
+      summary.textContent = normalReviewMode === 'longterm' ? '今天没有需要处理的长期巩固词。' : '当前没有正常到期词。';
     }
     return;
   }
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
-  summary.textContent = `${normalReviewMode === 'backlog' && reviewContext.type === 'today' ? '历史积压 · ' : ''}${session.remedialRound ? `当天补救第 ${session.remedialRound} 轮 · ` : ''}小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 第 ${session.phase} 轮 · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `${normalReviewMode === 'longterm' && reviewContext.type === 'today' ? '长期巩固 · ' : ''}${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length} · 总词数 ${session.currentPoolIds.length}`;
   const needsAudioStart = reviewContext.type === 'today' && state.settings.autoPronounce && !reviewAudioEnabled;
   audioStartBox.classList.toggle('hidden', !needsAudioStart);
   if (needsAudioStart) {
@@ -2115,7 +2126,7 @@ function renderReview() {
 
 async function finishNormalReviewStep(rating, addToWrongBook) {
   const session = reviewSession;
-  const { batch, item, baseBatches } = getSessionBatch(session);
+  const { batches, batch, item } = getSessionBatch(session);
   if (!item || !rating) return;
   const key = item.id;
   const prev = session.roundRatings[key] || {};
@@ -2123,8 +2134,7 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     prev.phase1 = rating;
     prev.hint1 = Boolean(session.usedHint);
     prev.forced1 = Boolean(session.forcedAgain);
-  }
-  if (session.phase === 2) {
+  } else {
     prev.phase2 = rating;
     prev.hint2 = Boolean(session.usedHint);
     prev.forced2 = Boolean(session.forcedAgain);
@@ -2132,19 +2142,15 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
   session.roundRatings[key] = prev;
 
   state.logs.unshift({
-    id: uuid(),
-    ts: new Date().toLocaleString('zh-CN'),
-    word: item.word,
-    source: reviewContext.type === 'batch' ? '日历批次复习' : '普通复习',
-    pass: session.phase === 1 ? '英→中' : '中→英',
-    rating,
-    addedToWrongBook: addToWrongBook,
-    inputValue: session.inputValue,
-    usedHint: Boolean(session.usedHint),
-    forcedAgain: Boolean(session.forcedAgain),
+    id: uuid(), ts: new Date().toLocaleString('zh-CN'), word: item.word,
+    source: reviewContext.type === 'batch' ? '日历批次复习' : (normalReviewMode === 'longterm' ? '长期巩固' : '今日到期'),
+    pass: session.phase === 1 ? '英→中' : '中→英', rating,
+    addedToWrongBook: addToWrongBook, inputValue: session.inputValue,
+    usedHint: Boolean(session.usedHint), forcedAgain: Boolean(session.forcedAgain),
   });
 
   const isLastWordInBatch = session.wordIndex >= batch.length - 1;
+  const isLastBatch = session.batchIndex >= batches.length - 1;
   session.showAnswer = false;
   session.autoAgainReady = false;
   session.inputValue = '';
@@ -2155,9 +2161,16 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     session.wordIndex += 1;
     return;
   }
+  if (!isLastBatch) {
+    session.batchIndex += 1;
+    session.wordIndex = 0;
+    return;
+  }
 
+  // 整个队列的英→中全部结束后，才统一开始中→英。
   if (session.phase === 1) {
     session.phase = 2;
+    session.batchIndex = 0;
     session.wordIndex = 0;
     return;
   }
@@ -2173,38 +2186,31 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     if (hadAgain) finalRating = 'Again';
     word.lastReviewDate = todayStr();
     word.lastFinalRating = finalRating || word.lastFinalRating;
-
     if (['Hard', 'Again'].includes(finalRating)) recordWeakOrError(id, finalRating, usedHint);
-
     if (hadAgain) {
       failedIds.push(id);
       return;
     }
-
-    const isDue = !word.nextReviewDate || word.nextReviewDate <= todayStr();
-    if (isDue) advanceNormalSchedule(word, finalRating, usedHint);
+    if (normalReviewMode === 'due') {
+      const info = getCoreDueInfo(word, todayStr());
+      if (info) {
+        word.scheduleStage = info.stageIndex;
+        word.stageIndex = info.stageIndex;
+      }
+    }
+    advanceNormalSchedule(word, finalRating, usedHint);
   });
 
-  session.batchOrders = {};
   session.roundRatings = {};
+  session.batchIndex = 0;
   session.wordIndex = 0;
-
   if (failedIds.length) {
-    session.currentPoolIds = [...new Set(failedIds)];
+    session.currentPoolIds = session.currentPoolIds.filter(id => failedIds.includes(id));
     session.remedialRound = (session.remedialRound || 0) + 1;
     session.phase = 1;
     return;
   }
-
-  const isLastBatch = session.batchIndex >= baseBatches.length - 1;
-  if (!isLastBatch) {
-    session.batchIndex += 1;
-    session.currentPoolIds = baseBatches[session.batchIndex] || [];
-    session.remedialRound = 0;
-    session.phase = 1;
-  } else {
-    session.completed = true;
-  }
+  session.completed = true;
 }
 
 function renderWrongBook() {
@@ -3063,7 +3069,7 @@ function bindEvents() {
     });
     reschedulePendingLegacyBacklog();
     reschedulePendingNormalCatchup();
-    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史错词每天 ${state.settings.backlogDailyLimit} 个；正常积压每天最多 ${state.settings.longTermDailyLimit} 个。`;
+    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史积压错词每天 ${state.settings.backlogDailyLimit} 个；长期巩固每天最多 ${state.settings.longTermDailyLimit} 个。`;
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
@@ -3194,7 +3200,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.8.2');
+      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta');
     } catch {
       // ignore
     }
