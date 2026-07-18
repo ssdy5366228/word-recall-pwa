@@ -1,5 +1,5 @@
-const APP_VERSION = 'v5.7';
-const APP_VERSION_NUMBER = '5.7.0';
+const APP_VERSION = 'v5.7.1';
+const APP_VERSION_NUMBER = '5.7.1';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -23,6 +23,9 @@ const MAX_LOCAL_FALLBACK_SNAPSHOTS = 3;
 const LS_SNAPSHOTS_KEY = 'word_recall_pwa_snapshots_v5_7';
 const DEFAULT_INTERVALS = [0, 1, 3, 7, 14, 21, 30, 60, 90, 180];
 const RECOVERY_DAYS = { Easy: 30, Good: 14, Hard: 3, Again: 1 };
+const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v1';
+const PRONUNCIATION_SETTINGS_VERSION = 1;
+const DICTIONARY_API_BASE = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
 
 const defaultState = {
   settings: {
@@ -31,7 +34,9 @@ const defaultState = {
     backlogDailyLimit: 8,
     longTermDailyLimit: 5,
     pronunciationLocale: 'en-US',
-    autoPronounce: false,
+    autoPronounce: true,
+    cachePronunciationOnAdd: true,
+    pronunciationSettingsVersion: PRONUNCIATION_SETTINGS_VERSION,
   },
   words: [],
   wrongBook: [],
@@ -57,6 +62,11 @@ let librarySearch = '';
 let showWrongList = false;
 let activeSwipeCard = null;
 let lastAutoSpokenKey = '';
+let activePronunciationAudio = null;
+let activePronunciationObjectUrl = '';
+let pronunciationRequestSerial = 0;
+let autoPlaybackBlockedToastShown = false;
+const dictionaryEntryPromises = new Map();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
 let lastKnownMeta = null;
@@ -233,10 +243,11 @@ function normalizeStoredCandidate(value, source, fallbackMeta = null) {
     const rawState = envelope ? envelope.state : value;
     const shape = validateRawStateShape(rawState);
     if (!shape.ok) return { ok: false, source, error: shape.error };
+    const rawChecksum = fnv1a(JSON.stringify(rawState));
     const prepared = sanitizeImportedState(rawState);
     const checksum = checksumState(prepared);
     const metadata = { ...(fallbackMeta || {}), ...(envelope?.metadata || {}) };
-    if (metadata.checksum && metadata.checksum !== checksum) {
+    if (metadata.checksum && metadata.checksum !== checksum && metadata.checksum !== rawChecksum) {
       return { ok: false, source, error: '校验值不一致', metadata };
     }
     return {
@@ -698,22 +709,252 @@ function makeEnglishHint(word) {
   return `${masked}${letters ? `（${letters} 个字母）` : ''}`;
 }
 
-function speakWord(text) {
-  const value = String(text || '').trim();
-  if (!value) return showToast('请先填写英文单词');
-  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
-    showToast('当前浏览器不支持语音朗读');
-    return;
+function normalizePronunciationWord(text) {
+  return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function stopPronunciationPlayback() {
+  try {
+    window.speechSynthesis?.cancel?.();
+  } catch {
+    // Ignore browser speech cancellation errors.
   }
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(value);
-  utterance.lang = state.settings.pronunciationLocale || 'en-US';
-  utterance.rate = 0.9;
-  const voices = window.speechSynthesis.getVoices?.() || [];
-  const exact = voices.find(voice => voice.lang === utterance.lang);
-  const languageMatch = voices.find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()));
-  if (exact || languageMatch) utterance.voice = exact || languageMatch;
-  window.speechSynthesis.speak(utterance);
+  if (activePronunciationAudio) {
+    try {
+      activePronunciationAudio.pause();
+      activePronunciationAudio.removeAttribute('src');
+      activePronunciationAudio.load?.();
+    } catch {
+      // Best effort only.
+    }
+  }
+  activePronunciationAudio = null;
+  if (activePronunciationObjectUrl) {
+    try { URL.revokeObjectURL(activePronunciationObjectUrl); } catch { /* ignore */ }
+    activePronunciationObjectUrl = '';
+  }
+}
+
+function pronunciationCacheRequest(word, locale) {
+  const normalized = normalizePronunciationWord(word);
+  const safeLocale = ['en-US', 'en-GB'].includes(locale) ? locale : 'en-US';
+  return new Request(new URL(`./__pronunciation_cache__/${safeLocale}/${encodeURIComponent(normalized)}`, location.href).href);
+}
+
+function detectAudioLocale(url) {
+  const value = String(url || '').toLowerCase();
+  if (/(?:^|[-_/])(us|usa)(?:[-_.?/]|$)/.test(value) || value.includes('en-us')) return 'en-US';
+  if (/(?:^|[-_/])(uk|gb)(?:[-_.?/]|$)/.test(value) || value.includes('en-gb')) return 'en-GB';
+  if (/(?:^|[-_/])au(?:[-_.?/]|$)/.test(value) || value.includes('en-au')) return 'en-AU';
+  return '';
+}
+
+function normalizeAudioUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('//')) return `https:${raw}`;
+  try {
+    const parsed = new URL(raw, 'https://api.dictionaryapi.dev/');
+    if (parsed.protocol === 'http:') parsed.protocol = 'https:';
+    if (parsed.protocol !== 'https:') return '';
+    return parsed.href;
+  } catch {
+    return '';
+  }
+}
+
+async function fetchDictionaryEntries(word) {
+  const value = normalizePronunciationWord(word);
+  if (!value) throw new Error('empty-word');
+  if (dictionaryEntryPromises.has(value)) return dictionaryEntryPromises.get(value);
+  const task = (async () => {
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+    try {
+      const response = await fetch(`${DICTIONARY_API_BASE}${encodeURIComponent(value)}`, {
+        method: 'GET',
+        signal: controller?.signal,
+        cache: 'no-store',
+        credentials: 'omit',
+      });
+      if (!response.ok) throw new Error(`dictionary-${response.status}`);
+      const entries = await response.json();
+      return Array.isArray(entries) ? entries : [];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  })();
+  dictionaryEntryPromises.set(value, task);
+  try {
+    const result = await task;
+    setTimeout(() => {
+      if (dictionaryEntryPromises.get(value) === task) dictionaryEntryPromises.delete(value);
+    }, 60000);
+    return result;
+  } catch (error) {
+    dictionaryEntryPromises.delete(value);
+    throw error;
+  }
+}
+
+function selectDictionaryPronunciation(entries, preferredLocale) {
+  const candidates = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    for (const item of Array.isArray(entry.phonetics) ? entry.phonetics : []) {
+      const audioUrl = normalizeAudioUrl(item?.audio);
+      if (!audioUrl) continue;
+      candidates.push({
+        audioUrl,
+        locale: detectAudioLocale(audioUrl),
+        phonetic: String(item?.text || entry?.phonetic || ''),
+      });
+    }
+  }
+  if (!candidates.length) return null;
+  const preferred = candidates.find(item => item.locale === preferredLocale);
+  const alternateLocale = preferredLocale === 'en-GB' ? 'en-US' : 'en-GB';
+  const alternate = candidates.find(item => item.locale === alternateLocale);
+  const neutral = candidates.find(item => !item.locale);
+  return preferred || alternate || neutral || candidates[0];
+}
+
+async function getCachedPronunciationBlob(word, locale) {
+  if (!('caches' in window)) return null;
+  try {
+    const cache = await caches.open(AUDIO_CACHE_NAME);
+    const response = await cache.match(pronunciationCacheRequest(word, locale));
+    if (!response) return null;
+    const blob = await response.blob();
+    return blob?.size ? blob : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAndCachePronunciationBlob(word, locale, audioUrl) {
+  if (!('caches' in window)) return null;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
+  try {
+    const response = await fetch(audioUrl, {
+      method: 'GET',
+      mode: 'cors',
+      credentials: 'omit',
+      cache: 'no-store',
+      signal: controller?.signal,
+    });
+    if (!response.ok || response.type === 'opaque') throw new Error(`audio-${response.status || response.type}`);
+    const cacheCopy = response.clone();
+    const blob = await response.blob();
+    if (!blob?.size) throw new Error('empty-audio');
+    const cache = await caches.open(AUDIO_CACHE_NAME);
+    await cache.put(pronunciationCacheRequest(word, locale), cacheCopy);
+    return blob;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function prepareDictionaryPronunciation(word, locale = state.settings.pronunciationLocale || 'en-US') {
+  const value = normalizePronunciationWord(word);
+  if (!value) throw new Error('empty-word');
+  const cachedBlob = await getCachedPronunciationBlob(value, locale);
+  if (cachedBlob) return { source: 'cache', blob: cachedBlob, locale };
+  const entries = await fetchDictionaryEntries(value);
+  const selected = selectDictionaryPronunciation(entries, locale);
+  if (!selected?.audioUrl) throw new Error('no-dictionary-audio');
+  try {
+    const blob = await fetchAndCachePronunciationBlob(value, locale, selected.audioUrl);
+    if (blob) return { source: 'dictionary-cache', blob, locale: selected.locale || locale, phonetic: selected.phonetic, audioUrl: selected.audioUrl };
+  } catch {
+    // Some audio servers permit media playback but not JavaScript CORS reads.
+  }
+  return { source: 'dictionary-direct', audioUrl: selected.audioUrl, locale: selected.locale || locale, phonetic: selected.phonetic };
+}
+
+async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = false }) {
+  if (requestId !== pronunciationRequestSerial) return { played: false, stale: true };
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.playsInline = true;
+  if (blob) {
+    activePronunciationObjectUrl = URL.createObjectURL(blob);
+    audio.src = activePronunciationObjectUrl;
+  } else {
+    audio.src = audioUrl;
+  }
+  activePronunciationAudio = audio;
+  try {
+    await audio.play();
+    return { played: true, blocked: false };
+  } catch (error) {
+    const blocked = error?.name === 'NotAllowedError';
+    if (auto && blocked && !autoPlaybackBlockedToastShown) {
+      autoPlaybackBlockedToastShown = true;
+      showToast('iPhone 阻止了首次自动播放，请先点一次喇叭');
+    }
+    return { played: false, blocked, error };
+  }
+}
+
+function speakWithSystemVoice(text, { auto = false } = {}) {
+  const value = String(text || '').trim();
+  if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+    if (!auto) showToast('当前浏览器不支持发音');
+    return false;
+  }
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(value);
+    utterance.lang = state.settings.pronunciationLocale || 'en-US';
+    utterance.rate = 0.88;
+    const voices = window.speechSynthesis.getVoices?.() || [];
+    const exact = voices.find(voice => voice.lang === utterance.lang);
+    const languageMatch = voices.find(voice => voice.lang?.toLowerCase().startsWith(utterance.lang.slice(0, 2).toLowerCase()));
+    if (exact || languageMatch) utterance.voice = exact || languageMatch;
+    window.speechSynthesis.speak(utterance);
+    return true;
+  } catch {
+    if (!auto) showToast('系统备用发音失败');
+    return false;
+  }
+}
+
+async function speakWord(text, options = {}) {
+  const value = String(text || '').trim();
+  const auto = Boolean(options.auto);
+  if (!value) {
+    if (!auto) showToast('请先填写英文单词');
+    return false;
+  }
+  const requestId = ++pronunciationRequestSerial;
+  stopPronunciationPlayback();
+  try {
+    const prepared = await prepareDictionaryPronunciation(value, state.settings.pronunciationLocale || 'en-US');
+    if (requestId !== pronunciationRequestSerial) return false;
+    const playback = await playHtmlAudio({ ...prepared, requestId, auto });
+    if (playback.played) return true;
+    if (playback.blocked || playback.stale) return false;
+  } catch {
+    // Use system speech only when the dictionary has no usable audio or the network is unavailable.
+  }
+  if (requestId !== pronunciationRequestSerial) return false;
+  const usedSystem = speakWithSystemVoice(value, { auto });
+  if (usedSystem && !auto) showToast('未取得词典音频，已使用系统备用发音');
+  return usedSystem;
+}
+
+async function prefetchPronunciation(word, { notify = false } = {}) {
+  try {
+    const prepared = await prepareDictionaryPronunciation(word, state.settings.pronunciationLocale || 'en-US');
+    if (notify) {
+      showToast(prepared.source === 'cache' ? '该词发音已在本机缓存' : prepared.blob ? '词典发音已缓存' : '已找到词典发音，使用时在线播放');
+    }
+    return true;
+  } catch {
+    if (notify) showToast('暂未找到词典发音，使用时将尝试系统发音');
+    return false;
+  }
 }
 
 function maybeAutoSpeak(word, key) {
@@ -721,7 +962,7 @@ function maybeAutoSpeak(word, key) {
   const wrongActive = document.getElementById('wrongbook')?.classList.contains('active');
   if ((!reviewActive && !wrongActive) || !state.settings.autoPronounce || !word || lastAutoSpokenKey === key) return;
   lastAutoSpokenKey = key;
-  setTimeout(() => speakWord(word), 60);
+  setTimeout(() => speakWord(word, { auto: true }), 80);
 }
 
 function firstMeaningGloss(meaning) {
@@ -745,22 +986,11 @@ function generateFallbackExample(word, partOfSpeech = '', meaning = '') {
 }
 
 async function fetchDictionaryData(word) {
-  const value = String(word || '').trim();
-  if (!value) throw new Error('empty-word');
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
-  let response;
-  try {
-    response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(value)}`, { method: 'GET', signal: controller?.signal });
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-  if (!response.ok) throw new Error(`dictionary-${response.status}`);
-  const entries = await response.json();
+  const entries = await fetchDictionaryEntries(word);
   let example = '';
   let partOfSpeech = '';
   let phonetic = '';
-  for (const entry of Array.isArray(entries) ? entries : []) {
+  for (const entry of entries) {
     phonetic = phonetic || String(entry.phonetic || '') || String((entry.phonetics || []).find(item => item.text)?.text || '');
     for (const meaning of entry.meanings || []) {
       partOfSpeech = partOfSpeech || String(meaning.partOfSpeech || '');
@@ -1014,6 +1244,13 @@ function normalizeSettings(rawSettings = {}) {
   const backlogDailyLimit = [5, 8, 10].includes(Number(rawSettings.backlogDailyLimit)) ? Number(rawSettings.backlogDailyLimit) : 8;
   const longTermDailyLimit = [3, 5, 8].includes(Number(rawSettings.longTermDailyLimit)) ? Number(rawSettings.longTermDailyLimit) : 5;
   const pronunciationLocale = ['en-US', 'en-GB'].includes(rawSettings.pronunciationLocale) ? rawSettings.pronunciationLocale : 'en-US';
+  const pronunciationSettingsVersion = Math.max(0, Number(rawSettings.pronunciationSettingsVersion || 0));
+  const autoPronounce = pronunciationSettingsVersion >= PRONUNCIATION_SETTINGS_VERSION
+    ? Boolean(rawSettings.autoPronounce)
+    : true;
+  const cachePronunciationOnAdd = Object.prototype.hasOwnProperty.call(rawSettings, 'cachePronunciationOnAdd')
+    ? Boolean(rawSettings.cachePronunciationOnAdd)
+    : true;
   return {
     dailyQuota,
     intervals,
@@ -1021,7 +1258,9 @@ function normalizeSettings(rawSettings = {}) {
     backlogDailyLimit,
     longTermDailyLimit,
     pronunciationLocale,
-    autoPronounce: Boolean(rawSettings.autoPronounce),
+    autoPronounce,
+    cachePronunciationOnAdd,
+    pronunciationSettingsVersion: PRONUNCIATION_SETTINGS_VERSION,
   };
 }
 
@@ -1336,11 +1575,13 @@ async function loadState() {
   setInitializedFlag();
 
   const isMigration = selected.source.startsWith('legacy-');
-  if (isMigration) {
-    await createSnapshot(`migration-before:${selected.source}`, state);
+  const isVersionUpgrade = Boolean(selected.metadata.appVersion) && selected.metadata.appVersion !== APP_VERSION_NUMBER;
+  if (isMigration || isVersionUpgrade) {
+    const migrationSource = isVersionUpgrade ? `${selected.source}:${selected.metadata.appVersion}->${APP_VERSION_NUMBER}` : selected.source;
+    await createSnapshot(`migration-before:${migrationSource}`, state);
     await persistPreparedState(state, {
       allowLargeDecrease: true,
-      migratedFrom: selected.source,
+      migratedFrom: migrationSource,
       migrationTime: new Date().toISOString(),
     });
   } else {
@@ -1633,9 +1874,13 @@ function renderReview() {
   inputWrap.classList.toggle('hidden', session.phase !== 2);
   if (session.phase === 2) input.value = session.inputValue;
 
-  speakBtn.classList.toggle('hidden', session.phase !== 1);
+  speakBtn.classList.toggle('hidden', session.phase !== 1 && !session.showAnswer);
   speakBtn.onclick = () => speakWord(item.word);
-  if (session.phase === 1) maybeAutoSpeak(item.word, `normal:${item.id}:${session.batchIndex}:${session.remedialRound}:${session.phase}:${session.wordIndex}`);
+  if (session.phase === 1) {
+    maybeAutoSpeak(item.word, `normal:${item.id}:${session.batchIndex}:${session.remedialRound}:${session.phase}:${session.wordIndex}`);
+  } else if (!session.showAnswer) {
+    stopPronunciationPlayback();
+  }
 
   if (session.usedHint) {
     hintBox.textContent = session.phase === 1 ? makeMeaningHint(item.meaning) : makeEnglishHint(item.word);
@@ -1882,7 +2127,7 @@ function renderWrongBook() {
       </div>
     ` : `
       <div class="answer-box">
-        <p><strong>答案：</strong>${escapeHtml(item.word)}</p>
+        <div class="word-title-row"><p style="margin:0;"><strong>答案：</strong>${escapeHtml(item.word)}</p><button class="icon-btn" id="wrongbookAnswerSpeakBtn" type="button" aria-label="播放发音">🔊</button></div>
         <p><strong>释义：</strong>${escapeHtml(item.meaning)}</p>
         <p><strong>例句：</strong>${escapeHtml(item.example || '—')}</p>
         ${item.exampleMeaning ? `<p><strong>例句中文：</strong>${escapeHtml(item.exampleMeaning)}</p>` : ''}
@@ -1894,10 +2139,16 @@ function renderWrongBook() {
     `}
   `;
 
+  if (session.showAnswer) {
+    const answerSpeakBtn = document.getElementById('wrongbookAnswerSpeakBtn');
+    if (answerSpeakBtn) answerSpeakBtn.onclick = () => speakWord(item.word);
+  }
+
   if (session.phase === 1) {
     document.getElementById('wrongbookSpeakBtn').onclick = () => speakWord(item.word);
     maybeAutoSpeak(item.word, `wrong:${item.id}:${session.remedialRound}:${session.batchIndex}:${session.phase}:${session.wordIndex}`);
   } else {
+    if (!session.showAnswer) stopPronunciationPlayback();
     document.getElementById('wrongbookInputEnglish').oninput = e => {
       session.inputValue = e.target.value;
       if (session.showAnswer) renderWrongBook();
@@ -2259,6 +2510,7 @@ function renderSettings() {
   document.getElementById('longTermDailyLimitSelect').value = String(state.settings.longTermDailyLimit);
   document.getElementById('pronunciationLocaleSelect').value = state.settings.pronunciationLocale || 'en-US';
   document.getElementById('autoPronounceCheckbox').checked = Boolean(state.settings.autoPronounce);
+  document.getElementById('cachePronunciationOnAddCheckbox').checked = state.settings.cachePronunciationOnAdd !== false;
 
   const settingsMsgEl = document.getElementById('settingsMsg');
   if (settingsMessage) {
@@ -2360,6 +2612,7 @@ function renderSettings() {
 }
 
 function switchTab(tabId) {
+  if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById(tabId).classList.add('active');
   document.querySelectorAll('.bottom-nav button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
@@ -2431,6 +2684,9 @@ async function saveEditModal() {
   resetWrongBookSession();
   renderAll();
   showToast('已保存修改');
+  if (state.settings.cachePronunciationOnAdd !== false && nextWord) {
+    setTimeout(() => prefetchPronunciation(nextWord), 0);
+  }
 }
 
 
@@ -2448,6 +2704,9 @@ async function addWord(entry) {
   resetNormalReviewSession();
   resetWrongBookSession();
   renderAll();
+  if (state.settings.cachePronunciationOnAdd !== false && entry.word) {
+    setTimeout(() => prefetchPronunciation(entry.word), 0);
+  }
   return { ok: true };
 }
 
@@ -2652,6 +2911,8 @@ function bindEvents() {
     state.settings.longTermDailyLimit = Number(document.getElementById('longTermDailyLimitSelect').value) || 5;
     state.settings.pronunciationLocale = document.getElementById('pronunciationLocaleSelect').value || 'en-US';
     state.settings.autoPronounce = document.getElementById('autoPronounceCheckbox').checked;
+    state.settings.cachePronunciationOnAdd = document.getElementById('cachePronunciationOnAddCheckbox').checked;
+    state.settings.pronunciationSettingsVersion = PRONUNCIATION_SETTINGS_VERSION;
     state.words = state.words.map(word => {
       const nextStage = remapStageIndex(oldIntervals, nextIntervals, word.scheduleStage || word.stageIndex || 0);
       return { ...word, scheduleStage: nextStage, stageIndex: nextStage };
@@ -2789,7 +3050,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=5.7.0');
+      await navigator.serviceWorker.register('./sw.js?v=5.7.1');
     } catch {
       // ignore
     }

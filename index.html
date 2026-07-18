@@ -8,15 +8,15 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=5.7.0" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=5.7.0" />
-  <link rel="stylesheet" href="./styles.css?v=5.7.0" />
+  <link rel="manifest" href="./manifest.webmanifest?v=5.7.1" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=5.7.1" />
+  <link rel="stylesheet" href="./styles.css?v=5.7.1" />
 </head>
 <body>
   <header class="app-header">
     <div>
       <h1>Word Recall</h1>
-      <p class="sub">长期复习 + 薄弱词恢复 + 发音 + 例句</p>
+      <p class="sub">长期复习 + 薄弱词恢复 + 词典发音 + 例句</p>
     </div>
   </header>
 
@@ -50,7 +50,7 @@
           <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.7</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v5.7.1</div>
     </section>
 
     <section id="review" class="view">
@@ -262,9 +262,13 @@
         </select>
         <label class="check-row" for="autoPronounceCheckbox">
           <input id="autoPronounceCheckbox" type="checkbox" />
-          <span>英文→中文出题时自动播放</span>
+          <span>英文→中文切换到新单词时自动播放</span>
         </label>
-        <div class="small muted">中文→英文阶段不会自动播放，也不显示发音按钮，避免泄露答案。</div>
+        <label class="check-row" for="cachePronunciationOnAddCheckbox">
+          <input id="cachePronunciationOnAddCheckbox" type="checkbox" />
+          <span>录入新词后自动获取并缓存词典发音</span>
+        </label>
+        <div class="small muted">优先播放在线词典音频，首次使用后缓存到本机；查不到或网络不可用时才使用系统备用发音。中文→英文出题阶段不播放、不显示喇叭，显示答案后才可播放。</div>
       </article>
 
       <article class="card">
@@ -375,6 +379,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=5.7.0" defer></script>
+  <script src="./app.js?v=5.7.1" defer></script>
 </body>
 </html>

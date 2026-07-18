@@ -1,13 +1,14 @@
-const CACHE_NAME = 'word-recall-pwa-5.7.0';
+const CACHE_NAME = 'word-recall-pwa-5.7.1';
+const AUDIO_CACHE_PREFIX = 'word-recall-pronunciation-';
 const ASSETS = [
   './',
   './index.html',
-  './index.html?v=5.7.0',
-  './styles.css?v=5.7.0',
-  './app.js?v=5.7.0',
-  './manifest.webmanifest?v=5.7.0',
-  './icon-180.png?v=5.7.0',
-  './icon-512.png?v=5.7.0'
+  './index.html?v=5.7.1',
+  './styles.css?v=5.7.1',
+  './app.js?v=5.7.1',
+  './manifest.webmanifest?v=5.7.1',
+  './icon-180.png?v=5.7.1',
+  './icon-512.png?v=5.7.1'
 ];
 
 self.addEventListener('install', event => {
@@ -15,7 +16,7 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME && !key.startsWith(AUDIO_CACHE_PREFIX)).map(key => caches.delete(key)))).then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', event => {
