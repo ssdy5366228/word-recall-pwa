@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 2';
-const APP_VERSION_NUMBER = '6.0.0-beta.2';
+const APP_VERSION = 'v6.0 Beta 3';
+const APP_VERSION_NUMBER = '6.0.0-beta.3';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -1516,13 +1516,11 @@ function getCoreDueInfo(word, targetDate = todayStr()) {
 }
 
 function getNormalQueueGroups(targetDate = todayStr()) {
-  const activeRecoveryIds = getWrongBookIds();
   const sorter = (a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.word || '').localeCompare(String(b.word || ''));
   const coreDue = [];
   const longTermDue = [];
 
   state.words.forEach(word => {
-    if (activeRecoveryIds.has(word.id)) return;
     const coreInfo = getCoreDueInfo(word, targetDate);
     if (coreInfo) {
       coreDue.push(word);
@@ -1559,7 +1557,6 @@ function getBatchSummary(targetDate = todayStr()) {
       const info = getCoreDueInfo(word, targetDate);
       return info && info.interval === interval;
     });
-    if (!words.length) return null;
     let phase1Done = 0;
     let phase2Done = 0;
     if (sessionIsCurrent) {
@@ -1578,7 +1575,7 @@ function getBatchSummary(targetDate = todayStr()) {
       phase1Remaining: Math.max(0, words.length - phase1Done),
       phase2Remaining: Math.max(0, words.length - phase2Done),
     };
-  }).filter(Boolean);
+  });
 }
 
 function getPlannedCoreReviewCount(targetDate) {
@@ -1809,9 +1806,24 @@ function getReviewContextKey() {
   return reviewContext.type === 'batch' && reviewContext.sourceDate ? `batch:${reviewContext.sourceDate}` : `today:${normalReviewMode}`;
 }
 
+function buildStableNormalOrder(queue) {
+  if (reviewContext.type === 'today' && normalReviewMode === 'due') {
+    const targetDate = todayStr();
+    const ordered = [];
+    [...getCoreIntervals()].sort((a, b) => b - a).forEach(interval => {
+      const stageIds = queue
+        .filter(word => getCoreDueInfo(word, targetDate)?.interval === interval)
+        .map(word => word.id);
+      ordered.push(...shuffleArray(stageIds));
+    });
+    return ordered;
+  }
+  return shuffleArray(queue.map(word => word.id));
+}
+
 function startNormalReviewSession() {
   const queue = buildNormalQueue();
-  const orderedIds = shuffleArray(queue.map(w => w.id));
+  const orderedIds = buildStableNormalOrder(queue);
   reviewSession = {
     type: 'normal',
     contextKey: getReviewContextKey(),
@@ -3239,7 +3251,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta');
+      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.3');
     } catch {
       // ignore
     }
