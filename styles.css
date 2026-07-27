@@ -297,3 +297,5 @@ textarea { min-height: 96px; resize: vertical; }
 .fatal-panel { width: min(680px, 100%); max-height: 90vh; overflow: auto; background: #fff; border-radius: 22px; padding: 20px; box-shadow: 0 24px 70px rgba(15,23,42,.32); }
 .fatal-title { font-size: 22px; font-weight: 800; color: #b91c1c; }
 .fatal-panel p { line-height: 1.7; }
+
+.task-card{width:100%;text-align:left;border:1px solid #dbe3ef;font:inherit;cursor:pointer}.task-card:active{transform:scale(.99)}

@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.3" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.3" />
-  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.3" />
+  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.4" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.4" />
+  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.4" />
 </head>
 <body>
   <header class="app-header">
@@ -23,10 +23,11 @@
   <main class="app-main">
     <section id="dashboard" class="view active">
       <div class="stats-grid">
-        <article class="card stat-card"><div class="label">今日到期 0–30天</div><div class="value" id="todayDueCount">0</div></article>
-        <article class="card stat-card"><div class="label">积压＋薄弱词</div><div class="value" id="todayRecoveryCount">0</div></article>
+        <button class="card stat-card task-card" id="openDueTaskBtn" type="button"><div class="label">今日到期 0–30天</div><div class="value" id="todayDueCount">0</div><div class="small muted">必须完成</div></button>
+        <button class="card stat-card task-card" id="openBacklogTaskBtn" type="button"><div class="label">历史积压</div><div class="value" id="todayBacklogCount">0</div><div class="small muted" id="backlogTaskMeta">今日释放 0</div></button>
+        <button class="card stat-card task-card" id="openLongTermTaskBtn" type="button"><div class="label">长期巩固</div><div class="value" id="todayLongTermCount">0</div><div class="small muted" id="longTermTaskMeta">今日释放 0</div></button>
+        <button class="card stat-card task-card" id="openWeakTaskBtn" type="button"><div class="label">薄弱词恢复</div><div class="value" id="todayWeakCount">0</div><div class="small muted" id="weakTaskMeta">今日释放 0</div></button>
         <article class="card stat-card"><div class="label">今日新学目标</div><div class="value" id="todayNewQuota">5</div></article>
-        <article class="card stat-card"><div class="label">活跃错词</div><div class="value" id="wrongWordCount">0</div></article>
         <article class="card stat-card"><div class="label">总词数</div><div class="value" id="totalWordCount">0</div></article>
       </div>
 
@@ -43,14 +44,14 @@
       <article class="card">
         <div class="section-title">使用说明</div>
         <div class="notes" id="usageNotes">
-          <p>1. 今日到期的全部单词先统一完成英文→中文，再按相同顺序统一完成中文→英文。</p>
-          <p>2. Again 会在两轮结束后进入当日循环，并进入后续薄弱词恢复；Hard 会安排近期再次复习。</p>
-          <p>3. 历史错词按每日上限逐步释放，不再一次面对全部积压词。</p>
-          <p>4. 60 / 90 / 180 天为独立长期巩固，不并入历史积压。</p>
+          <p>1. 今日到期按 30→21→14→7→3→1→0 天批次排列，批次内随机；全部先完成英文→中文，再按相同顺序完成中文→英文。</p>
+          <p>2. 首页四个任务共用同一复习界面；完成一个任务后返回今日页，再自行选择下一项。</p>
+          <p>3. 历史积压、长期巩固和薄弱词恢复分别按各自每日上限释放，互不合并。</p>
+          <p>4. Again 会在当前任务两轮结束后进入当日循环；Hard / Again 同时记录到后续薄弱词恢复。</p>
           <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 3</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 4</div>
     </section>
 
     <section id="review" class="view">
@@ -244,6 +245,10 @@
         <input id="longTermDailyLimitSelect" type="number" min="0" max="999" step="1" inputmode="numeric" value="10" />
         <div class="small muted" style="margin-top:8px;">长期巩固独立于历史积压；0 表示当天不安排，999 近似全部。</div>
 
+        <label for="weakDailyLimitSelect">每日薄弱词恢复数量</label>
+        <input id="weakDailyLimitSelect" type="number" min="0" max="999" step="1" inputmode="numeric" value="10" />
+        <div class="small muted" style="margin-top:8px;">只控制近期 Hard / Again 薄弱词；0 表示当天不安排。</div>
+
         <div class="button-row wrap">
           <button class="btn primary" id="saveSettingsBtn">保存设置</button>
           <button class="btn danger-outline" id="clearAllBtn">清空全部数据</button>
@@ -377,6 +382,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=6.0.0-beta.3" defer></script>
+  <script src="./app.js?v=6.0.0-beta.4" defer></script>
 </body>
 </html>

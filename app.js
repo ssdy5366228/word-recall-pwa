@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 3';
-const APP_VERSION_NUMBER = '6.0.0-beta.3';
+const APP_VERSION = 'v6.0 Beta 4';
+const APP_VERSION_NUMBER = '6.0.0-beta.4';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -33,6 +33,7 @@ const defaultState = {
     intervals: DEFAULT_INTERVALS,
     backlogDailyLimit: 8,
     longTermDailyLimit: 10,
+    weakDailyLimit: 10,
     pronunciationLocale: 'en-US',
     autoPronounce: true,
     cachePronunciationOnAdd: true,
@@ -69,7 +70,7 @@ let activePronunciationObjectUrl = '';
 let pronunciationRequestSerial = 0;
 let autoPlaybackBlockedToastShown = false;
 let reviewAudioEnabled = false;
-let normalReviewMode = 'due'; // due | longterm
+let normalReviewMode = 'due'; // due | backlog | longterm | weak
 const dictionaryEntryPromises = new Map();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
@@ -1296,6 +1297,8 @@ function normalizeSettings(rawSettings = {}) {
   const backlogDailyLimit = [5, 8, 10].includes(Number(rawSettings.backlogDailyLimit)) ? Number(rawSettings.backlogDailyLimit) : 8;
   const parsedNormalBacklogLimit = Number(rawSettings.longTermDailyLimit);
   const longTermDailyLimit = Number.isFinite(parsedNormalBacklogLimit) ? Math.min(999, Math.max(0, Math.floor(parsedNormalBacklogLimit))) : 10;
+  const parsedWeakLimit = Number(rawSettings.weakDailyLimit);
+  const weakDailyLimit = Number.isFinite(parsedWeakLimit) ? Math.min(999, Math.max(0, Math.floor(parsedWeakLimit))) : 10;
   const pronunciationLocale = ['en-US', 'en-GB'].includes(rawSettings.pronunciationLocale) ? rawSettings.pronunciationLocale : 'en-US';
   const pronunciationSettingsVersion = Math.max(0, Number(rawSettings.pronunciationSettingsVersion || 0));
   const autoPronounce = pronunciationSettingsVersion >= PRONUNCIATION_SETTINGS_VERSION
@@ -1310,6 +1313,7 @@ function normalizeSettings(rawSettings = {}) {
     batchSize: dailyQuota,
     backlogDailyLimit,
     longTermDailyLimit,
+    weakDailyLimit,
     pronunciationLocale,
     autoPronounce,
     cachePronunciationOnAdd,
@@ -1795,11 +1799,30 @@ function resetWrongBookSession() {
   wrongBookSession = null;
 }
 
+function getTodayBacklogWords() {
+  const limit = Math.max(0, Number(state.settings.backlogDailyLimit || 0));
+  const items = getWrongBookItems({ dueOnly: true }).filter(item => item.source !== 'recent');
+  return limit === 0 ? [] : items.slice(0, limit);
+}
+
+function getTodayWeakWords() {
+  const limit = Math.max(0, Number(state.settings.weakDailyLimit || 0));
+  const items = getWrongBookItems({ dueOnly: true }).filter(item => item.source === 'recent');
+  return limit === 0 ? [] : items.slice(0, limit);
+}
+
+function getReviewModeLabel(mode = normalReviewMode) {
+  return ({ due: '今日到期', backlog: '历史积压', longterm: '长期巩固', weak: '薄弱词恢复' })[mode] || '复习';
+}
+
 function buildNormalQueue() {
   if (reviewContext.type === 'batch' && reviewContext.sourceDate) {
     return state.words.filter(word => word.createdAt === reviewContext.sourceDate).sort((a, b) => a.word.localeCompare(b.word));
   }
-  return normalReviewMode === 'longterm' ? getTodayLongTermWords(todayStr()) : getTodayDueWords(todayStr());
+  if (normalReviewMode === 'backlog') return getTodayBacklogWords();
+  if (normalReviewMode === 'longterm') return getTodayLongTermWords(todayStr());
+  if (normalReviewMode === 'weak') return getTodayWeakWords();
+  return getTodayDueWords(todayStr());
 }
 
 function getReviewContextKey() {
@@ -1925,15 +1948,23 @@ function renderDashboard() {
   const longTermReleased = getTodayLongTermWords(today);
   const dueRecovery = getWrongBookItems({ dueOnly: true });
   const activeWrong = getWrongBookItems();
+  const backlogAll = activeWrong.filter(item => item.source !== 'recent');
+  const weakAll = activeWrong.filter(item => item.source === 'recent');
+  const backlogReleased = getTodayBacklogWords();
+  const weakReleased = getTodayWeakWords();
   const recentDue = dueRecovery.filter(item => item.source === 'recent').length;
   const legacyDue = dueRecovery.filter(item => item.source !== 'recent').length;
   const newCount = state.words.filter(word => word.createdAt === today).length;
   const batchSummary = getBatchSummary(today);
 
   document.getElementById('todayDueCount').textContent = dueWords.length;
-  document.getElementById('todayRecoveryCount').textContent = dueRecovery.length;
+  document.getElementById('todayBacklogCount').textContent = backlogAll.length;
+  document.getElementById('todayLongTermCount').textContent = longTermAll.length;
+  document.getElementById('todayWeakCount').textContent = weakAll.length;
+  document.getElementById('backlogTaskMeta').textContent = `今日释放 ${backlogReleased.length}`;
+  document.getElementById('longTermTaskMeta').textContent = `今日释放 ${longTermReleased.length}`;
+  document.getElementById('weakTaskMeta').textContent = `今日释放 ${weakReleased.length}`;
   document.getElementById('todayNewQuota').textContent = state.settings.dailyQuota;
-  document.getElementById('wrongWordCount').textContent = activeWrong.length;
   document.getElementById('totalWordCount').textContent = state.words.length;
   document.getElementById('todayPlan').innerHTML = `
     <p>① 今日到期（0/1/3/7/14/21/30 天）：<strong>${dueWords.length}</strong> 个。</p>
@@ -1953,6 +1984,17 @@ function renderDashboard() {
       `).join('')
     : '<p class="muted">今天没有 0–30 天阶段真正到期的单词。</p>';
   document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
+  const openTask = mode => {
+    reviewContext = { type: 'today', sourceDate: null };
+    normalReviewMode = mode;
+    resetNormalReviewSession();
+    lastAutoSpokenKey = '';
+    switchTab('review');
+  };
+  document.getElementById('openDueTaskBtn').onclick = () => openTask('due');
+  document.getElementById('openBacklogTaskBtn').onclick = () => openTask('backlog');
+  document.getElementById('openLongTermTaskBtn').onclick = () => openTask('longterm');
+  document.getElementById('openWeakTaskBtn').onclick = () => openTask('weak');
 }
 
 
@@ -1970,7 +2012,7 @@ function renderReview() {
     banner.textContent = `当前来自日历：${reviewContext.sourceDate} 批次。`;
     banner.classList.remove('hidden');
   } else {
-    title.textContent = normalReviewMode === 'longterm' ? '长期巩固复习' : '今日到期复习';
+    title.textContent = `${getReviewModeLabel()}复习`;
     banner.classList.add('hidden');
     banner.textContent = '';
   }
@@ -1981,23 +2023,9 @@ function renderReview() {
     box.classList.add('hidden');
     summary.classList.add('hidden');
     audioStartBox.classList.add('hidden');
-    if (reviewContext.type === 'today' && normalReviewMode === 'due') {
-      const longCount = getTodayLongTermWords(todayStr()).length;
-      done.innerHTML = longCount
-        ? `今日到期两轮已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startLongTermReviewBtn">继续长期巩固 ${longCount} 个</button><button class="btn" id="finishTodayReviewBtn">今天结束</button></div>`
-        : '今日到期两轮已完成。';
-      done.classList.remove('hidden');
-      document.getElementById('startLongTermReviewBtn')?.addEventListener('click', () => {
-        normalReviewMode = 'longterm';
-        resetNormalReviewSession();
-        lastAutoSpokenKey = '';
-        renderReview();
-      });
-      document.getElementById('finishTodayReviewBtn')?.addEventListener('click', () => switchTab('today'));
-    } else {
-      done.textContent = normalReviewMode === 'longterm' ? '今日长期巩固已完成。' : '当前复习已完成。';
-      done.classList.remove('hidden');
-    }
+    done.innerHTML = `${getReviewModeLabel()}两轮已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="returnDashboardBtn">返回今日页</button></div>`;
+    done.classList.remove('hidden');
+    document.getElementById('returnDashboardBtn').onclick = () => switchTab('dashboard');
     return;
   }
 
@@ -2006,40 +2034,30 @@ function renderReview() {
     box.classList.add('hidden');
     audioStartBox.classList.add('hidden');
     summary.classList.remove('hidden');
-    if (reviewContext.type === 'today' && normalReviewMode === 'due') {
-      const longCount = getTodayLongTermWords(todayStr()).length;
-      summary.innerHTML = longCount
-        ? `今天没有 0–30 天阶段到期词。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="startLongTermWithoutDueBtn">开始长期巩固 ${longCount} 个</button></div>`
-        : '今天没有 0–30 天阶段到期词。';
-      document.getElementById('startLongTermWithoutDueBtn')?.addEventListener('click', () => {
-        normalReviewMode = 'longterm';
-        resetNormalReviewSession();
-        lastAutoSpokenKey = '';
-        renderReview();
-      });
-    } else {
-      summary.textContent = normalReviewMode === 'longterm' ? '今天没有需要处理的长期巩固词。' : '当前没有正常到期词。';
-    }
+    summary.innerHTML = `当前没有需要处理的${getReviewModeLabel()}词。<div class="button-row wrap" style="margin-top:12px;"><button class="btn" id="emptyReturnDashboardBtn">返回今日页</button></div>`;
+    document.getElementById('emptyReturnDashboardBtn').onclick = () => switchTab('dashboard');
     return;
   }
 
   box.classList.remove('hidden');
   summary.classList.remove('hidden');
   const overallIndex = Math.min(session.batchIndex * session.batchSize + session.wordIndex + 1, session.currentPoolIds.length);
-  summary.textContent = `${normalReviewMode === 'longterm' && reviewContext.type === 'today' ? '长期巩固 · ' : ''}${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 总进度 ${overallIndex}/${session.currentPoolIds.length} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 批内 ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
+  summary.textContent = `${getReviewModeLabel()} · ${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 总进度 ${overallIndex}/${session.currentPoolIds.length} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 批内 ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
   const needsAudioStart = reviewContext.type === 'today' && state.settings.autoPronounce && !reviewAudioEnabled;
   audioStartBox.classList.toggle('hidden', !needsAudioStart);
   if (needsAudioStart) {
     box.classList.add('hidden');
     audioStartBox.innerHTML = '<button class="btn primary" id="enableReviewAudioBtn">开始复习并启用发音</button><div class="small muted" style="margin-top:8px;">iPhone 只需点击一次，之后英文→中文会自动发音。</div>';
     document.getElementById('enableReviewAudioBtn').onclick = async () => {
-      const unlocked = await unlockPronunciationAudio();
+      if (reviewAudioEnabled) return;
+      const unlockPromise = unlockPronunciationAudio();
       reviewAudioEnabled = true;
       autoPlaybackBlockedToastShown = false;
       lastAutoSpokenKey = '';
-      if (!unlocked) showToast('已尝试启用发音；若仍无声，请检查静音键和媒体音量');
-      await speakWord(item.word, { auto: false });
       renderReview();
+      const unlocked = await unlockPromise;
+      if (!unlocked) showToast('已显示单词；若仍无声，请检查静音键和媒体音量');
+      await speakWord(item.word, { auto: false });
     };
     return;
   }
@@ -2067,7 +2085,7 @@ function renderReview() {
   modeText.textContent = session.phase === 1 ? '第一轮：英文 → 中文，先主动回忆目标义项' : '第二轮：中文 → 英文，输入英文拼写';
   prompt.textContent = session.phase === 1 ? item.word : item.meaning;
   const dueInfo = reviewContext.type === 'today' && normalReviewMode === 'due' ? getCoreDueInfo(item, todayStr()) : null;
-  const sourceLabel = dueInfo ? `${dueInfo.interval} 天阶段｜${item.createdAt} 新增批次｜今日到期` : (normalReviewMode === 'longterm' ? `长期巩固｜${item.nextReviewDate || '到期日未设置'}` : `${item.createdAt || '日期未知'} 新增批次`);
+  const sourceLabel = dueInfo ? `${dueInfo.interval} 天阶段｜${item.createdAt} 新增批次｜今日到期` : ((normalReviewMode === 'longterm') ? `长期巩固｜${item.nextReviewDate || '到期日未设置'}` : `${getReviewModeLabel()}｜${item.nextReviewDate || item.createdAt || '日期未知'}`);
   meta.textContent = `${sourceLabel} ｜ 标签：${(item.tags || []).join(' / ') || '无'}`;
   inputWrap.classList.toggle('hidden', session.phase !== 2);
   if (session.phase === 2) input.value = session.inputValue;
@@ -2195,7 +2213,7 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
 
   state.logs.unshift({
     id: uuid(), ts: new Date().toLocaleString('zh-CN'), word: item.word,
-    source: reviewContext.type === 'batch' ? '日历批次复习' : (normalReviewMode === 'longterm' ? '长期巩固' : '今日到期'),
+    source: reviewContext.type === 'batch' ? '日历批次复习' : getReviewModeLabel(),
     pass: session.phase === 1 ? '英→中' : '中→英', rating,
     addedToWrongBook: addToWrongBook, inputValue: session.inputValue,
     usedHint: Boolean(session.usedHint), forcedAgain: Boolean(session.forcedAgain),
@@ -2241,6 +2259,10 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     if (['Hard', 'Again'].includes(finalRating)) recordWeakOrError(id, finalRating, usedHint);
     if (hadAgain) {
       failedIds.push(id);
+      return;
+    }
+    if (normalReviewMode === 'backlog' || normalReviewMode === 'weak') {
+      settleRecoveryReview(id, finalRating, usedHint);
       return;
     }
     if (normalReviewMode === 'due') {
@@ -2701,6 +2723,7 @@ function renderSettings() {
   document.getElementById('intervalInput').value = state.settings.intervals.join(',');
   document.getElementById('backlogDailyLimitSelect').value = String(state.settings.backlogDailyLimit);
   document.getElementById('longTermDailyLimitSelect').value = String(state.settings.longTermDailyLimit);
+  document.getElementById('weakDailyLimitSelect').value = String(state.settings.weakDailyLimit ?? 10);
   document.getElementById('pronunciationLocaleSelect').value = state.settings.pronunciationLocale || 'en-US';
   document.getElementById('autoPronounceCheckbox').checked = Boolean(state.settings.autoPronounce);
   document.getElementById('cachePronunciationOnAddCheckbox').checked = state.settings.cachePronunciationOnAdd !== false;
@@ -3110,6 +3133,7 @@ function bindEvents() {
     state.settings.intervals = nextIntervals;
     state.settings.backlogDailyLimit = Number(document.getElementById('backlogDailyLimitSelect').value) || 8;
     state.settings.longTermDailyLimit = Math.min(999, Math.max(0, Number(document.getElementById('longTermDailyLimitSelect').value) || 0));
+    state.settings.weakDailyLimit = Math.min(999, Math.max(0, Number(document.getElementById('weakDailyLimitSelect').value) || 0));
     state.settings.pronunciationLocale = document.getElementById('pronunciationLocaleSelect').value || 'en-US';
     state.settings.autoPronounce = document.getElementById('autoPronounceCheckbox').checked;
     state.settings.cachePronunciationOnAdd = document.getElementById('cachePronunciationOnAddCheckbox').checked;
@@ -3120,7 +3144,7 @@ function bindEvents() {
     });
     reschedulePendingLegacyBacklog();
     reschedulePendingNormalCatchup();
-    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史积压错词每天 ${state.settings.backlogDailyLimit} 个；长期巩固每天最多 ${state.settings.longTermDailyLimit} 个。`;
+    settingsMessage = `已保存：正常间隔 ${nextIntervals.join(', ')} 天；历史积压每天 ${state.settings.backlogDailyLimit} 个；长期巩固每天最多 ${state.settings.longTermDailyLimit} 个；薄弱词每天最多 ${state.settings.weakDailyLimit} 个。`;
     await saveState();
     resetNormalReviewSession();
     resetWrongBookSession();
@@ -3251,7 +3275,7 @@ function bindEvents() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.3');
+      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4');
     } catch {
       // ignore
     }
