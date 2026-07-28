@@ -1,4 +1,4 @@
-Word Recall v6.0 Beta 4
+Word Recall v6.0 Beta 4.1
 
 本测试版基于 v6.0 Beta 3，主要调整：
 1. 今日页以四个独立任务入口呈现：今日到期、历史积压、长期巩固、薄弱词恢复。

@@ -1,4 +1,4 @@
-const APP_VERSION = 'v6.0 Beta 4';
+const APP_VERSION = 'v6.0 Beta 4.1';
 const APP_VERSION_NUMBER = '6.0.0-beta.4';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
@@ -2828,17 +2828,11 @@ function renderSettings() {
 }
 
 function switchTab(tabId) {
-  const wasReviewActive = document.getElementById('review')?.classList.contains('active');
   if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
-  if (tabId === 'review' && !wasReviewActive && reviewContext.type === 'today' && !reviewSession) {
-    normalReviewMode = 'due';
-    lastAutoSpokenKey = '';
-  }
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById(tabId).classList.add('active');
   document.querySelectorAll('.bottom-nav button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
   if (tabId === 'review') {
-    if (reviewContext.type === 'today' && !reviewSession) normalReviewMode = 'due';
     renderReview();
   }
   if (tabId === 'calendarTab') renderCalendar();
@@ -2992,7 +2986,15 @@ function buildExportPayload() {
 
 function bindEvents() {
   document.querySelectorAll('.bottom-nav button').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tab === 'review' && !document.getElementById('review')?.classList.contains('active')) {
+        reviewContext = { type: 'today', sourceDate: null };
+        normalReviewMode = 'due';
+        resetNormalReviewSession();
+        lastAutoSpokenKey = '';
+      }
+      switchTab(btn.dataset.tab);
+    });
   });
 
   document.getElementById('addWordBtn').addEventListener('click', handleAddTodayWord);
