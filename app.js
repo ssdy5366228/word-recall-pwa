@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.1';
-const APP_VERSION_NUMBER = '6.0.0-beta.4';
+const APP_VERSION = 'v6.0 Beta 4.2';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.2';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -16,6 +16,7 @@ const APP_INITIALIZED_KEY = 'word_recall_app_initialized';
 const LEGACY_LS_STATE_KEYS = ['word_recall_pwa_state_v5_6_1', 'word_recall_pwa_state_v5_6', 'word_recall_pwa_state_v5_5_beta'];
 const LS_TODAY_DRAFT_KEY = 'word_recall_pwa_today_draft_v5_7';
 const LS_CALENDAR_DRAFT_KEY = 'word_recall_pwa_calendar_draft_v5_7';
+const LS_REVIEW_SESSIONS_KEY = 'word_recall_pwa_review_sessions_v6_0_beta_4_2';
 const LEGACY_TODAY_DRAFT_KEYS = ['word_recall_pwa_today_draft_v5_6_1', 'word_recall_pwa_today_draft_v5_6', 'word_recall_pwa_today_draft_v5_5_beta'];
 const LEGACY_CALENDAR_DRAFT_KEYS = ['word_recall_pwa_calendar_draft_v5_6_1', 'word_recall_pwa_calendar_draft_v5_6', 'word_recall_pwa_calendar_draft_v5_5_beta'];
 const MAX_SNAPSHOTS = 10;
@@ -1762,6 +1763,7 @@ async function runReviewSubmission(kind, operation) {
   showToast('处理中…');
   try {
     await operation();
+    persistNormalReviewSession();
     await saveState();
     if (kind === 'normal') {
       resetWrongBookSession();
@@ -1791,8 +1793,68 @@ async function runReviewSubmission(kind, operation) {
 }
 
 
-function resetNormalReviewSession() {
+function readReviewSessions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LS_REVIEW_SESSIONS_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeReviewSessions(sessions) {
+  try {
+    localStorage.setItem(LS_REVIEW_SESSIONS_KEY, JSON.stringify(sessions || {}));
+  } catch (error) {
+    console.warn('复习会话保存失败', error);
+  }
+}
+
+function persistNormalReviewSession() {
+  if (!reviewSession || !reviewSession.contextKey) return;
+  const sessions = readReviewSessions();
+  if (reviewSession.completed) delete sessions[reviewSession.contextKey];
+  else sessions[reviewSession.contextKey] = cloneValue(reviewSession);
+  writeReviewSessions(sessions);
+}
+
+function restoreNormalReviewSession(contextKey = getReviewContextKey()) {
+  const sessions = readReviewSessions();
+  const saved = sessions[contextKey];
+  if (!saved || saved.completed || saved.contextKey !== contextKey) return null;
+  const validIds = new Set(state.words.map(word => word.id));
+  const queueIds = Array.isArray(saved.queueIds) ? saved.queueIds.filter(id => validIds.has(id)) : [];
+  const currentPoolIds = Array.isArray(saved.currentPoolIds) ? saved.currentPoolIds.filter(id => validIds.has(id)) : [];
+  if (!queueIds.length || !currentPoolIds.length) {
+    delete sessions[contextKey];
+    writeReviewSessions(sessions);
+    return null;
+  }
+  return { ...saved, queueIds, currentPoolIds, orderedIds: Array.isArray(saved.orderedIds) ? saved.orderedIds.filter(id => validIds.has(id)) : queueIds.slice() };
+}
+
+function clearStoredNormalReviewSession(contextKey = null) {
+  if (!contextKey) {
+    try { localStorage.removeItem(LS_REVIEW_SESSIONS_KEY); } catch {}
+    return;
+  }
+  const sessions = readReviewSessions();
+  delete sessions[contextKey];
+  writeReviewSessions(sessions);
+}
+
+function activateNormalReviewTask(mode, context = { type: 'today', sourceDate: null }) {
+  persistNormalReviewSession();
+  reviewContext = context;
+  normalReviewMode = mode;
+  reviewSession = restoreNormalReviewSession(getReviewContextKey());
+  lastAutoSpokenKey = '';
+}
+
+function resetNormalReviewSession(options = {}) {
+  const { clearAllStored = true } = options;
   reviewSession = null;
+  if (clearAllStored) clearStoredNormalReviewSession();
 }
 
 function resetWrongBookSession() {
@@ -1867,6 +1929,7 @@ function startNormalReviewSession() {
     usedHint: false,
     forcedAgain: false,
   };
+  persistNormalReviewSession();
 }
 
 function startWrongBookSession(queueOverride = null, remedialRound = 0) {
@@ -1895,6 +1958,9 @@ function startWrongBookSession(queueOverride = null, remedialRound = 0) {
 
 function ensureNormalReviewSession() {
   const contextKey = getReviewContextKey();
+  if (!reviewSession || reviewSession.contextKey !== contextKey) {
+    reviewSession = restoreNormalReviewSession(contextKey);
+  }
   if (!reviewSession || reviewSession.contextKey !== contextKey || reviewSession.batchSize !== getBatchSize()) {
     startNormalReviewSession();
     return;
@@ -1985,10 +2051,7 @@ function renderDashboard() {
     : '<p class="muted">今天没有 0–30 天阶段真正到期的单词。</p>';
   document.getElementById('appVersionLine').textContent = `Version: ${APP_VERSION}`;
   const openTask = mode => {
-    reviewContext = { type: 'today', sourceDate: null };
-    normalReviewMode = mode;
-    resetNormalReviewSession();
-    lastAutoSpokenKey = '';
+    activateNormalReviewTask(mode, { type: 'today', sourceDate: null });
     switchTab('review');
   };
   document.getElementById('openDueTaskBtn').onclick = () => openTask('due');
@@ -2000,6 +2063,7 @@ function renderDashboard() {
 
 function renderReview() {
   ensureNormalReviewSession();
+  persistNormalReviewSession();
   const title = document.getElementById('reviewSectionTitle');
   const banner = document.getElementById('reviewBanner');
   const summary = document.getElementById('reviewSummary');
@@ -2025,7 +2089,7 @@ function renderReview() {
     audioStartBox.classList.add('hidden');
     done.innerHTML = `${getReviewModeLabel()}两轮已完成。<div class="button-row wrap" style="margin-top:12px;"><button class="btn primary" id="returnDashboardBtn">返回今日页</button></div>`;
     done.classList.remove('hidden');
-    document.getElementById('returnDashboardBtn').onclick = () => switchTab('dashboard');
+    document.getElementById('returnDashboardBtn').onclick = () => { clearStoredNormalReviewSession(session.contextKey); reviewSession = null; switchTab('dashboard'); };
     return;
   }
 
@@ -2132,6 +2196,7 @@ function renderReview() {
   document.getElementById('hintBtn').onclick = () => {
     if (reviewSubmitting) return;
     session.usedHint = true;
+    persistNormalReviewSession();
     renderReview();
   };
   document.getElementById('showAnswerBtn').onclick = () => {
@@ -2139,6 +2204,7 @@ function renderReview() {
     session.showAnswer = true;
     session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
     session.autoAgainReady = session.phase === 2 && !getEnglishCheckResult(session.inputValue, item.word).isCorrect;
+    persistNormalReviewSession();
     renderReview();
   };
   document.getElementById('giveUpBtn').onclick = () => {
@@ -2147,6 +2213,7 @@ function renderReview() {
     session.showAnswer = true;
     session.inputValue = document.getElementById('reviewInputEnglish').value.trim();
     session.autoAgainReady = true;
+    persistNormalReviewSession();
     renderReview();
   };
 
@@ -2229,11 +2296,13 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
 
   if (!isLastWordInBatch) {
     session.wordIndex += 1;
+    persistNormalReviewSession();
     return;
   }
   if (!isLastBatch) {
     session.batchIndex += 1;
     session.wordIndex = 0;
+    persistNormalReviewSession();
     return;
   }
 
@@ -2242,6 +2311,7 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     session.phase = 2;
     session.batchIndex = 0;
     session.wordIndex = 0;
+    persistNormalReviewSession();
     return;
   }
 
@@ -2282,9 +2352,11 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     session.currentPoolIds = session.currentPoolIds.filter(id => failedIds.includes(id));
     session.remedialRound = (session.remedialRound || 0) + 1;
     session.phase = 1;
+    persistNormalReviewSession();
     return;
   }
   session.completed = true;
+  clearStoredNormalReviewSession(session.contextKey);
 }
 
 function renderWrongBook() {
@@ -2828,6 +2900,7 @@ function renderSettings() {
 }
 
 function switchTab(tabId) {
+  if (document.getElementById('review')?.classList.contains('active') && tabId !== 'review') persistNormalReviewSession();
   if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById(tabId).classList.add('active');
@@ -2988,10 +3061,7 @@ function bindEvents() {
   document.querySelectorAll('.bottom-nav button').forEach(btn => {
     btn.addEventListener('click', () => {
       if (btn.dataset.tab === 'review' && !document.getElementById('review')?.classList.contains('active')) {
-        reviewContext = { type: 'today', sourceDate: null };
-        normalReviewMode = 'due';
-        resetNormalReviewSession();
-        lastAutoSpokenKey = '';
+        activateNormalReviewTask('due', { type: 'today', sourceDate: null });
       }
       switchTab(btn.dataset.tab);
     });
@@ -3086,8 +3156,7 @@ function bindEvents() {
   });
 
   document.getElementById('reviewSelectedBatchBtn').addEventListener('click', () => {
-    reviewContext = { type: 'batch', sourceDate: selectedDate };
-    resetNormalReviewSession();
+    activateNormalReviewTask('due', { type: 'batch', sourceDate: selectedDate });
     switchTab('review');
   });
 
@@ -3101,6 +3170,7 @@ function bindEvents() {
   document.getElementById('reviewInputEnglish').addEventListener('input', e => {
     ensureNormalReviewSession();
     reviewSession.inputValue = e.target.value;
+    persistNormalReviewSession();
     if (reviewSession.showAnswer) renderReview();
   });
 
@@ -3274,10 +3344,13 @@ function bindEvents() {
   document.getElementById('editBackdrop').addEventListener('click', closeEditModal);
 }
 
+window.addEventListener('pagehide', () => persistNormalReviewSession());
+window.addEventListener('beforeunload', () => persistNormalReviewSession());
+
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4');
+      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4.2');
     } catch {
       // ignore
     }
