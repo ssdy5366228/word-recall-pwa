@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.5';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.5';
+const APP_VERSION = 'v6.0 Beta 4.6.1';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.6.1';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -737,10 +737,12 @@ function unlockPronunciationAudio() {
   if (pronunciationAudioUnlocked) return Promise.resolve(true);
   if (pronunciationUnlockPromise) return pronunciationUnlockPromise;
   const audio = getSharedPronunciationAudio();
-  const silentWav = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+  const silentWav = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
   try {
     audio.src = silentWav;
-    audio.muted = true;
+    // Use an UNMUTED silent-content WAV so a successful play follows the same
+    // permission path as real pronunciation audio on iPhone/Safari.
+    audio.muted = false;
     pronunciationUnlockPromise = audio.play().then(() => {
       audio.pause();
       audio.currentTime = 0;
@@ -758,14 +760,19 @@ function unlockPronunciationAudio() {
 }
 
 async function unlockAndSpeakWord(text, options = {}) {
-  // Important on iPhone/Safari: finish the user-gesture unlock on the shared
-  // media element before any real pronunciation request starts. Starting both
-  // at once can let the unlock cleanup pause the real word audio.
-  await unlockPronunciationAudio();
-  return speakWord(text, options);
+  // Manual pronunciation always starts by unlocking the SAME media element
+  // synchronously from the click handler. Once that promise settles, the same
+  // element can be reused after async dictionary/cache work on iPhone/Safari.
+  const unlocked = await unlockPronunciationAudio();
+  return speakWord(text, { ...options, userGestureUnlocked: unlocked });
 }
 
-function stopPronunciationPlayback() {
+function stopPronunciationPlayback({ invalidate = false } = {}) {
+  if (invalidate) {
+    pronunciationRequestSerial += 1;
+    autoSpeakScheduleSerial += 1;
+    lastAutoSpokenKey = '';
+  }
   try {
     window.speechSynthesis?.cancel?.();
   } catch {
@@ -1053,32 +1060,55 @@ async function speakWord(text, options = {}) {
     if (!auto) showToast('请先填写英文单词');
     return false;
   }
+
   const requestId = ++pronunciationRequestSerial;
   stopPronunciationPlayback();
   const locale = state.settings.pronunciationLocale || 'en-US';
+  let dictionaryFailure = '';
+  let htmlAudioBlocked = false;
+
   try {
     let prepared = await prepareDictionaryPronunciation(value, locale);
     if (requestId !== pronunciationRequestSerial) return false;
+
     let playback = await playPreparedPronunciation(prepared, requestId, auto);
     if (playback.played) return true;
-    if (playback.blocked || playback.stale) return false;
+    if (playback.stale) return false;
+    htmlAudioBlocked = htmlAudioBlocked || Boolean(playback.blocked);
 
-    // A corrupted/unsupported cached blob should not poison future attempts.
-    if (prepared.source === 'cache') {
+    // A cached blob that fails for a codec/data reason should be replaced.
+    // A NotAllowedError is a browser permission/autoplay issue, NOT a bad cache,
+    // so keep the cache and continue to system speech fallback instead.
+    if (prepared.source === 'cache' && !playback.blocked) {
       await deleteCachedPronunciation(value, locale);
       if (requestId !== pronunciationRequestSerial) return false;
       prepared = await prepareDictionaryPronunciation(value, locale, { skipCache: true });
       if (requestId !== pronunciationRequestSerial) return false;
       playback = await playPreparedPronunciation(prepared, requestId, auto);
       if (playback.played) return true;
-      if (playback.blocked || playback.stale) return false;
+      if (playback.stale) return false;
+      htmlAudioBlocked = htmlAudioBlocked || Boolean(playback.blocked);
     }
-  } catch {
+  } catch (error) {
+    dictionaryFailure = String(error?.message || error || 'dictionary-failed');
     // Dictionary/network failure falls through to system speech.
   }
+
   if (requestId !== pronunciationRequestSerial) return false;
+
+  // IMPORTANT: even when HTMLAudioElement.play() was blocked by Safari,
+  // do NOT return here. Always give SpeechSynthesis a chance to rescue audio.
   const usedSystem = await speakWithSystemVoice(value, { auto });
-  if (!auto) showToast(usedSystem ? '未取得词典音频，已使用系统备用发音' : '发音失败，请检查网络、手机音量或稍后重试');
+  if (!auto) {
+    if (usedSystem) {
+      showToast(htmlAudioBlocked
+        ? '词典音频被浏览器拦截，已使用系统备用发音'
+        : '未取得词典音频，已使用系统备用发音');
+    } else {
+      const reason = htmlAudioBlocked ? '浏览器拦截音频播放' : (dictionaryFailure ? '词典音频获取失败' : '音频播放失败');
+      showToast(`发音失败：${reason}；请检查媒体音量或稍后重试`);
+    }
+  }
   return usedSystem;
 }
 
@@ -2267,7 +2297,7 @@ function renderReview() {
   summary.classList.remove('hidden');
   const overallIndex = Math.min(session.batchIndex * session.batchSize + session.wordIndex + 1, session.currentPoolIds.length);
   summary.textContent = `${getReviewModeLabel()} · ${session.remedialRound ? `当日 Again 补救第 ${session.remedialRound} 轮 · ` : ''}第 ${session.phase} 轮 ${session.phase === 1 ? '英→中' : '中→英'} · 总进度 ${overallIndex}/${session.currentPoolIds.length} · 小批次 ${Math.min(session.batchIndex + 1, batches.length)}/${batches.length} · 批内 ${Math.min(session.wordIndex + 1, batch.length)}/${batch.length}`;
-  const needsAudioStart = reviewContext.type === 'today' && state.settings.autoPronounce && !reviewAudioEnabled;
+  const needsAudioStart = ['today', 'batch'].includes(reviewContext.type) && state.settings.autoPronounce && !reviewAudioEnabled;
   audioStartBox.classList.toggle('hidden', !needsAudioStart);
   if (needsAudioStart) {
     box.classList.add('hidden');
@@ -2277,14 +2307,17 @@ function renderReview() {
       const button = document.getElementById('enableReviewAudioBtn');
       if (button) button.disabled = true;
       const unlocked = await unlockPronunciationAudio();
-      reviewAudioEnabled = true;
+      reviewAudioEnabled = Boolean(unlocked);
       autoPlaybackBlockedToastShown = false;
       lastAutoSpokenKey = '';
-      // Render only after the unlock attempt has fully settled. renderReview()
-      // may schedule auto pronunciation, so this ordering prevents the unlock
-      // cleanup from racing with and pausing the real word audio.
+      if (!unlocked) {
+        if (button) button.disabled = false;
+        showToast('发音未成功启用，请再次点击；也可在设置中关闭自动发音后继续复习');
+        return;
+      }
+      // Render only after the real media unlock has succeeded. renderReview()
+      // may schedule auto pronunciation, so this ordering prevents races.
       renderReview();
-      if (!unlocked) showToast('已进入复习；若仍无声，可点喇叭重试并检查媒体音量');
     };
     return;
   }
@@ -3064,7 +3097,7 @@ function renderSettings() {
 
 function switchTab(tabId) {
   if (document.getElementById('review')?.classList.contains('active') && tabId !== 'review') persistNormalReviewSession();
-  if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback();
+  if (!['review', 'wrongbook'].includes(tabId)) stopPronunciationPlayback({ invalidate: true });
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.getElementById(tabId).classList.add('active');
   document.querySelectorAll('.bottom-nav button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabId));
@@ -3507,7 +3540,22 @@ function bindEvents() {
   document.getElementById('editBackdrop').addEventListener('click', closeEditModal);
 }
 
-window.addEventListener('pagehide', () => persistNormalReviewSession());
+window.addEventListener('pagehide', () => {
+  persistNormalReviewSession();
+  stopPronunciationPlayback({ invalidate: true });
+  reviewAudioEnabled = false;
+  pronunciationAudioUnlocked = false;
+  pronunciationUnlockPromise = null;
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    stopPronunciationPlayback({ invalidate: true });
+    reviewAudioEnabled = false;
+    pronunciationAudioUnlocked = false;
+    pronunciationUnlockPromise = null;
+  }
+});
 window.addEventListener('beforeunload', () => persistNormalReviewSession());
 
 async function cleanupLegacyPronunciationCaches() {
@@ -3522,7 +3570,7 @@ async function cleanupLegacyPronunciationCaches() {
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4.4');
+      await navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION_NUMBER}`);
     } catch {
       // ignore
     }
