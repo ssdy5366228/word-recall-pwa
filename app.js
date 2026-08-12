@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.4';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.4';
+const APP_VERSION = 'v6.0 Beta 4.5';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.5';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -755,6 +755,14 @@ function unlockPronunciationAudio() {
     pronunciationUnlockPromise = null;
     return Promise.resolve(false);
   }
+}
+
+async function unlockAndSpeakWord(text, options = {}) {
+  // Important on iPhone/Safari: finish the user-gesture unlock on the shared
+  // media element before any real pronunciation request starts. Starting both
+  // at once can let the unlock cleanup pause the real word audio.
+  await unlockPronunciationAudio();
+  return speakWord(text, options);
 }
 
 function stopPronunciationPlayback() {
@@ -2266,14 +2274,17 @@ function renderReview() {
     audioStartBox.innerHTML = '<button class="btn primary" id="enableReviewAudioBtn">开始复习并启用发音</button><div class="small muted" style="margin-top:8px;">iPhone 只需点击一次，之后英文→中文会自动发音。</div>';
     document.getElementById('enableReviewAudioBtn').onclick = async () => {
       if (reviewAudioEnabled) return;
-      const unlockPromise = unlockPronunciationAudio();
+      const button = document.getElementById('enableReviewAudioBtn');
+      if (button) button.disabled = true;
+      const unlocked = await unlockPronunciationAudio();
       reviewAudioEnabled = true;
       autoPlaybackBlockedToastShown = false;
       lastAutoSpokenKey = '';
+      // Render only after the unlock attempt has fully settled. renderReview()
+      // may schedule auto pronunciation, so this ordering prevents the unlock
+      // cleanup from racing with and pausing the real word audio.
       renderReview();
-      const unlocked = await unlockPromise;
-      if (!unlocked) showToast('已显示单词；若仍无声，请检查静音键和媒体音量');
-      await speakWord(item.word, { auto: false });
+      if (!unlocked) showToast('已进入复习；若仍无声，可点喇叭重试并检查媒体音量');
     };
     return;
   }
@@ -2307,7 +2318,7 @@ function renderReview() {
   if (session.phase === 2) input.value = session.inputValue;
 
   speakBtn.classList.toggle('hidden', session.phase !== 1 && !session.showAnswer);
-  speakBtn.onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
+  speakBtn.onclick = async () => { await unlockAndSpeakWord(item.word, { auto: false }); };
   if (session.phase === 1) {
     maybeAutoSpeak(item.word, `normal:${item.id}:${session.batchIndex}:${session.remedialRound}:${session.phase}:${session.wordIndex}`);
   } else if (!session.showAnswer) {
@@ -2580,11 +2591,11 @@ function renderWrongBook() {
 
   if (session.showAnswer) {
     const answerSpeakBtn = document.getElementById('wrongbookAnswerSpeakBtn');
-    if (answerSpeakBtn) answerSpeakBtn.onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
+    if (answerSpeakBtn) answerSpeakBtn.onclick = async () => { await unlockAndSpeakWord(item.word, { auto: false }); };
   }
 
   if (session.phase === 1) {
-    document.getElementById('wrongbookSpeakBtn').onclick = () => { unlockPronunciationAudio(); speakWord(item.word); };
+    document.getElementById('wrongbookSpeakBtn').onclick = async () => { await unlockAndSpeakWord(item.word, { auto: false }); };
     maybeAutoSpeak(item.word, `wrong:${item.id}:${session.remedialRound}:${session.batchIndex}:${session.phase}:${session.wordIndex}`);
   } else {
     if (!session.showAnswer) stopPronunciationPlayback();
@@ -2868,7 +2879,7 @@ function attachWordCardEvents(container) {
     const editBtn = card.querySelector('[data-action="edit"]');
     const deleteBtn = card.querySelector('[data-action="delete"]');
     const speakBtn = card.querySelector('[data-action="speak"]');
-    if (speakBtn) speakBtn.onclick = (e) => { e.stopPropagation(); unlockPronunciationAudio(); speakWord(word.word); };
+    if (speakBtn) speakBtn.onclick = async (e) => { e.stopPropagation(); await unlockAndSpeakWord(word.word, { auto: false }); };
     if (editBtn) editBtn.onclick = (e) => { e.stopPropagation(); activeSwipeCard = null; openEditModal(word.id); };
     if (deleteBtn) deleteBtn.onclick = async (e) => {
       e.stopPropagation();
@@ -3228,7 +3239,7 @@ function bindEvents() {
     meaningInputEl.addEventListener('input', () => autoResizeTextarea(meaningInputEl));
     autoResizeTextarea(meaningInputEl);
   }
-  document.getElementById('speakAddWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('wordInput').value); });
+  document.getElementById('speakAddWordBtn').addEventListener('click', async () => { await unlockAndSpeakWord(document.getElementById('wordInput').value, { auto: false }); });
   document.getElementById('generateExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'wordInput',
     meaningInputId: 'meaningInput',
@@ -3272,7 +3283,7 @@ function bindEvents() {
     calendarMeaningInputEl.addEventListener('input', () => autoResizeTextarea(calendarMeaningInputEl));
     autoResizeTextarea(calendarMeaningInputEl);
   }
-  document.getElementById('speakCalendarWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('calendarWordInput').value); });
+  document.getElementById('speakCalendarWordBtn').addEventListener('click', async () => { await unlockAndSpeakWord(document.getElementById('calendarWordInput').value, { auto: false }); });
   document.getElementById('generateCalendarExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'calendarWordInput',
     meaningInputId: 'calendarMeaningInput',
@@ -3283,7 +3294,7 @@ function bindEvents() {
 
   const editMeaningInputEl = document.getElementById('editMeaningInput');
   if (editMeaningInputEl) editMeaningInputEl.addEventListener('input', () => autoResizeTextarea(editMeaningInputEl));
-  document.getElementById('speakEditWordBtn').addEventListener('click', () => { unlockPronunciationAudio(); speakWord(document.getElementById('editWordInput').value); });
+  document.getElementById('speakEditWordBtn').addEventListener('click', async () => { await unlockAndSpeakWord(document.getElementById('editWordInput').value, { auto: false }); });
   document.getElementById('generateEditExampleBtn').addEventListener('click', () => autoFillExample({
     wordInputId: 'editWordInput',
     meaningInputId: 'editMeaningInput',
