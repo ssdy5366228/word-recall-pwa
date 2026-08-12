@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.2';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.2';
+const APP_VERSION = 'v6.0 Beta 4.4';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.4';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -24,7 +24,8 @@ const MAX_LOCAL_FALLBACK_SNAPSHOTS = 3;
 const LS_SNAPSHOTS_KEY = 'word_recall_pwa_snapshots_v5_7';
 const DEFAULT_INTERVALS = [0, 1, 3, 7, 14, 21, 30, 60, 90, 180];
 const RECOVERY_DAYS = { Easy: 30, Good: 14, Hard: 3, Again: 1 };
-const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v1';
+const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v2';
+const LEGACY_AUDIO_CACHE_NAMES = ['word-recall-pronunciation-v1'];
 const PRONUNCIATION_SETTINGS_VERSION = 1;
 const DICTIONARY_API_BASE = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
 
@@ -70,6 +71,7 @@ let pronunciationUnlockPromise = null;
 let activePronunciationObjectUrl = '';
 let pronunciationRequestSerial = 0;
 let autoPlaybackBlockedToastShown = false;
+let autoSpeakScheduleSerial = 0;
 let reviewAudioEnabled = false;
 let normalReviewMode = 'due'; // due | backlog | longterm | weak
 const dictionaryEntryPromises = new Map();
@@ -837,7 +839,7 @@ async function fetchDictionaryEntries(word) {
   }
 }
 
-function selectDictionaryPronunciation(entries, preferredLocale) {
+function selectDictionaryPronunciations(entries, preferredLocale) {
   const candidates = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     for (const item of Array.isArray(entry.phonetics) ? entry.phonetics : []) {
@@ -850,12 +852,13 @@ function selectDictionaryPronunciation(entries, preferredLocale) {
       });
     }
   }
-  if (!candidates.length) return null;
-  const preferred = candidates.find(item => item.locale === preferredLocale);
+  if (!candidates.length) return [];
   const alternateLocale = preferredLocale === 'en-GB' ? 'en-US' : 'en-GB';
-  const alternate = candidates.find(item => item.locale === alternateLocale);
-  const neutral = candidates.find(item => !item.locale);
-  return preferred || alternate || neutral || candidates[0];
+  const score = item => item.locale === preferredLocale ? 0 : item.locale === alternateLocale ? 1 : !item.locale ? 2 : 3;
+  return candidates
+    .map((item, index) => ({ ...item, _index: index }))
+    .sort((a, b) => score(a) - score(b) || a._index - b._index)
+    .map(({ _index, ...item }) => item);
 }
 
 async function getCachedPronunciationBlob(word, locale) {
@@ -871,8 +874,17 @@ async function getCachedPronunciationBlob(word, locale) {
   }
 }
 
+async function deleteCachedPronunciation(word, locale) {
+  if (!('caches' in window)) return false;
+  try {
+    const cache = await caches.open(AUDIO_CACHE_NAME);
+    return await cache.delete(pronunciationCacheRequest(word, locale));
+  } catch {
+    return false;
+  }
+}
+
 async function fetchAndCachePronunciationBlob(word, locale, audioUrl) {
-  if (!('caches' in window)) return null;
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), 12000) : null;
   try {
@@ -887,29 +899,43 @@ async function fetchAndCachePronunciationBlob(word, locale, audioUrl) {
     const cacheCopy = response.clone();
     const blob = await response.blob();
     if (!blob?.size) throw new Error('empty-audio');
-    const cache = await caches.open(AUDIO_CACHE_NAME);
-    await cache.put(pronunciationCacheRequest(word, locale), cacheCopy);
+    if ('caches' in window) {
+      try {
+        const cache = await caches.open(AUDIO_CACHE_NAME);
+        await cache.put(pronunciationCacheRequest(word, locale), cacheCopy);
+      } catch {
+        // Cache write failure must never block playback.
+      }
+    }
     return blob;
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
-async function prepareDictionaryPronunciation(word, locale = state.settings.pronunciationLocale || 'en-US') {
+async function prepareDictionaryPronunciation(word, locale = state.settings.pronunciationLocale || 'en-US', options = {}) {
   const value = normalizePronunciationWord(word);
   if (!value) throw new Error('empty-word');
-  const cachedBlob = await getCachedPronunciationBlob(value, locale);
-  if (cachedBlob) return { source: 'cache', blob: cachedBlob, locale };
-  const entries = await fetchDictionaryEntries(value);
-  const selected = selectDictionaryPronunciation(entries, locale);
-  if (!selected?.audioUrl) throw new Error('no-dictionary-audio');
-  try {
-    const blob = await fetchAndCachePronunciationBlob(value, locale, selected.audioUrl);
-    if (blob) return { source: 'dictionary-cache', blob, locale: selected.locale || locale, phonetic: selected.phonetic, audioUrl: selected.audioUrl };
-  } catch {
-    // Some audio servers permit media playback but not JavaScript CORS reads.
+  if (!options.skipCache) {
+    const cachedBlob = await getCachedPronunciationBlob(value, locale);
+    if (cachedBlob) return { source: 'cache', blob: cachedBlob, locale, word: value };
   }
-  return { source: 'dictionary-direct', audioUrl: selected.audioUrl, locale: selected.locale || locale, phonetic: selected.phonetic };
+  const entries = await fetchDictionaryEntries(value);
+  const candidates = selectDictionaryPronunciations(entries, locale);
+  if (!candidates.length) throw new Error('no-dictionary-audio');
+
+  // Try every dictionary audio candidate for a cacheable CORS response.
+  for (const selected of candidates) {
+    try {
+      const blob = await fetchAndCachePronunciationBlob(value, locale, selected.audioUrl);
+      if (blob) return { source: 'dictionary-cache', blob, locale: selected.locale || locale, phonetic: selected.phonetic, audioUrl: selected.audioUrl, candidates, word: value };
+    } catch {
+      // Keep going: another pronunciation host may still work.
+    }
+  }
+
+  // CORS may forbid fetch() while direct <audio> playback still works.
+  return { source: 'dictionary-direct', audioUrl: candidates[0].audioUrl, locale: candidates[0].locale || locale, phonetic: candidates[0].phonetic, candidates, word: value };
 }
 
 async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = false }) {
@@ -919,6 +945,10 @@ async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = fal
     audio.pause();
     audio.currentTime = 0;
     audio.muted = false;
+    if (activePronunciationObjectUrl) {
+      try { URL.revokeObjectURL(activePronunciationObjectUrl); } catch { /* ignore */ }
+      activePronunciationObjectUrl = '';
+    }
     if (blob) {
       activePronunciationObjectUrl = URL.createObjectURL(blob);
       audio.src = activePronunciationObjectUrl;
@@ -938,7 +968,7 @@ async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = fal
   }
 }
 
-function speakWithSystemVoice(text, { auto = false } = {}) {
+function speakWithSystemVoiceOnce(text, { auto = false } = {}) {
   const value = String(text || '').trim();
   return new Promise(resolve => {
     if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
@@ -948,6 +978,7 @@ function speakWithSystemVoice(text, { auto = false } = {}) {
     }
     try {
       window.speechSynthesis.cancel();
+      window.speechSynthesis.resume?.();
       const utterance = new SpeechSynthesisUtterance(value);
       utterance.lang = state.settings.pronunciationLocale || 'en-US';
       utterance.rate = 0.88;
@@ -964,13 +995,47 @@ function speakWithSystemVoice(text, { auto = false } = {}) {
       };
       utterance.onstart = () => finish(true);
       utterance.onerror = () => finish(false);
-      const timer = setTimeout(() => finish(false), 1800);
-      window.speechSynthesis.resume?.();
-      window.speechSynthesis.speak(utterance);
+      const timer = setTimeout(() => finish(false), 2200);
+      setTimeout(() => {
+        try {
+          window.speechSynthesis.resume?.();
+          window.speechSynthesis.speak(utterance);
+        } catch {
+          finish(false);
+        }
+      }, 60);
     } catch {
       resolve(false);
     }
   });
+}
+
+async function speakWithSystemVoice(text, { auto = false } = {}) {
+  if (await speakWithSystemVoiceOnce(text, { auto })) return true;
+  // iOS Safari can silently drop the first utterance after page/tab transitions.
+  await new Promise(resolve => setTimeout(resolve, 180));
+  try {
+    window.speechSynthesis?.cancel?.();
+    window.speechSynthesis?.resume?.();
+  } catch {
+    // best effort
+  }
+  return speakWithSystemVoiceOnce(text, { auto });
+}
+
+async function playPreparedPronunciation(prepared, requestId, auto) {
+  if (!prepared) return { played: false };
+  if (prepared.blob) return playHtmlAudio({ ...prepared, requestId, auto });
+  const candidates = Array.isArray(prepared.candidates) && prepared.candidates.length
+    ? prepared.candidates
+    : prepared.audioUrl ? [{ audioUrl: prepared.audioUrl }] : [];
+  let lastResult = { played: false };
+  for (const candidate of candidates) {
+    if (requestId !== pronunciationRequestSerial) return { played: false, stale: true };
+    lastResult = await playHtmlAudio({ audioUrl: candidate.audioUrl, requestId, auto });
+    if (lastResult.played || lastResult.blocked || lastResult.stale) return lastResult;
+  }
+  return lastResult;
 }
 
 async function speakWord(text, options = {}) {
@@ -982,18 +1047,30 @@ async function speakWord(text, options = {}) {
   }
   const requestId = ++pronunciationRequestSerial;
   stopPronunciationPlayback();
+  const locale = state.settings.pronunciationLocale || 'en-US';
   try {
-    const prepared = await prepareDictionaryPronunciation(value, state.settings.pronunciationLocale || 'en-US');
+    let prepared = await prepareDictionaryPronunciation(value, locale);
     if (requestId !== pronunciationRequestSerial) return false;
-    const playback = await playHtmlAudio({ ...prepared, requestId, auto });
+    let playback = await playPreparedPronunciation(prepared, requestId, auto);
     if (playback.played) return true;
     if (playback.blocked || playback.stale) return false;
+
+    // A corrupted/unsupported cached blob should not poison future attempts.
+    if (prepared.source === 'cache') {
+      await deleteCachedPronunciation(value, locale);
+      if (requestId !== pronunciationRequestSerial) return false;
+      prepared = await prepareDictionaryPronunciation(value, locale, { skipCache: true });
+      if (requestId !== pronunciationRequestSerial) return false;
+      playback = await playPreparedPronunciation(prepared, requestId, auto);
+      if (playback.played) return true;
+      if (playback.blocked || playback.stale) return false;
+    }
   } catch {
-    // Use system speech only when the dictionary has no usable audio or the network is unavailable.
+    // Dictionary/network failure falls through to system speech.
   }
   if (requestId !== pronunciationRequestSerial) return false;
   const usedSystem = await speakWithSystemVoice(value, { auto });
-  if (!auto) showToast(usedSystem ? '未取得词典音频，已使用系统备用发音' : '发音失败，请检查手机音量或稍后重试');
+  if (!auto) showToast(usedSystem ? '未取得词典音频，已使用系统备用发音' : '发音失败，请检查网络、手机音量或稍后重试');
   return usedSystem;
 }
 
@@ -1016,7 +1093,14 @@ function maybeAutoSpeak(word, key) {
   if ((!reviewActive && !wrongActive) || !state.settings.autoPronounce || !word || lastAutoSpokenKey === key) return;
   if (reviewActive && !reviewAudioEnabled) return;
   lastAutoSpokenKey = key;
-  setTimeout(() => speakWord(word, { auto: true }), 80);
+  const scheduleId = ++autoSpeakScheduleSerial;
+  setTimeout(() => {
+    if (scheduleId !== autoSpeakScheduleSerial || lastAutoSpokenKey !== key) return;
+    const stillReviewActive = document.getElementById('review')?.classList.contains('active');
+    const stillWrongActive = document.getElementById('wrongbook')?.classList.contains('active');
+    if (!stillReviewActive && !stillWrongActive) return;
+    speakWord(word, { auto: true });
+  }, 80);
 }
 
 function firstMeaningGloss(meaning) {
@@ -1545,10 +1629,58 @@ function getTodayDueWords(targetDate = todayStr()) {
   return getNormalQueueGroups(targetDate).coreDue;
 }
 
+
+function getLogDateStr(log) {
+  const raw = String(log?.ts || '');
+  const m = raw.match(/(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? '' : formatDate(parsed);
+}
+
+function getTodayCompletedTaskKeys(mode, targetDate = todayStr()) {
+  const source = getReviewModeLabel(mode);
+  const keys = new Set();
+  (state.logs || []).forEach(log => {
+    if (log?.source !== source || log?.pass !== '中→英' || getLogDateStr(log) !== targetDate) return;
+    const key = log.wordId || log.word;
+    if (key) keys.add(String(key));
+  });
+  return keys;
+}
+
+function getSavedTodayTaskSession(mode) {
+  const key = `today:${mode}`;
+  if (reviewSession && reviewSession.contextKey === key && !reviewSession.completed) return reviewSession;
+  const saved = readReviewSessions()[key];
+  return saved && !saved.completed ? saved : null;
+}
+
+function getTodayTaskProgress(mode, dueAvailableCount, dailyLimit = null) {
+  const completed = getTodayCompletedTaskKeys(mode).size;
+  const saved = getSavedTodayTaskSession(mode);
+  let total;
+  if (saved?.queueIds?.length) {
+    total = saved.queueIds.length;
+  } else if (dailyLimit == null) {
+    total = completed + Math.max(0, Number(dueAvailableCount || 0));
+  } else {
+    total = Math.min(Math.max(0, Number(dailyLimit || 0)), completed + Math.max(0, Number(dueAvailableCount || 0)));
+  }
+  return { completed: Math.min(completed, total), total, done: total > 0 && completed >= total };
+}
+
+function formatTaskProgressMeta(progress) {
+  if (!progress.total) return '今日无任务';
+  return `今日 ${progress.completed}/${progress.total}${progress.done ? ' · 已完成' : ''}`;
+}
+
 function getTodayLongTermWords(targetDate = todayStr()) {
   const limit = Math.max(0, Number(state.settings.longTermDailyLimit || 0));
+  const completed = getTodayCompletedTaskKeys('longterm', targetDate).size;
+  const remainingLimit = Math.max(0, limit - completed);
   const words = getNormalQueueGroups(targetDate).longTermDue;
-  return limit === 0 ? [] : words.slice(0, limit);
+  return remainingLimit === 0 ? [] : words.slice(0, remainingLimit);
 }
 
 function getBatchSummary(targetDate = todayStr()) {
@@ -1863,14 +1995,18 @@ function resetWrongBookSession() {
 
 function getTodayBacklogWords() {
   const limit = Math.max(0, Number(state.settings.backlogDailyLimit || 0));
+  const completed = getTodayCompletedTaskKeys('backlog').size;
+  const remainingLimit = Math.max(0, limit - completed);
   const items = getWrongBookItems({ dueOnly: true }).filter(item => item.source !== 'recent');
-  return limit === 0 ? [] : items.slice(0, limit);
+  return remainingLimit === 0 ? [] : items.slice(0, remainingLimit);
 }
 
 function getTodayWeakWords() {
   const limit = Math.max(0, Number(state.settings.weakDailyLimit || 0));
+  const completed = getTodayCompletedTaskKeys('weak').size;
+  const remainingLimit = Math.max(0, limit - completed);
   const items = getWrongBookItems({ dueOnly: true }).filter(item => item.source === 'recent');
-  return limit === 0 ? [] : items.slice(0, limit);
+  return remainingLimit === 0 ? [] : items.slice(0, remainingLimit);
 }
 
 function getReviewModeLabel(mode = normalReviewMode) {
@@ -2023,22 +2159,38 @@ function renderDashboard() {
   const newCount = state.words.filter(word => word.createdAt === today).length;
   const batchSummary = getBatchSummary(today);
 
-  document.getElementById('todayDueCount').textContent = dueWords.length;
+  const dueProgress = getTodayTaskProgress('due', dueWords.length);
+  const backlogProgress = getTodayTaskProgress('backlog', legacyDue, state.settings.backlogDailyLimit);
+  const longTermProgress = getTodayTaskProgress('longterm', longTermAll.length, state.settings.longTermDailyLimit);
+  const weakProgress = getTodayTaskProgress('weak', recentDue, state.settings.weakDailyLimit);
+  const coreIntervalsText = getCoreIntervals().join('/') || '未设置';
+  const longTermIntervalsText = getLongTermIntervals().join('/') || '未设置';
+
+  document.getElementById('todayDueCount').textContent = dueProgress.total || dueWords.length;
   document.getElementById('todayBacklogCount').textContent = backlogAll.length;
   document.getElementById('todayLongTermCount').textContent = longTermAll.length;
   document.getElementById('todayWeakCount').textContent = weakAll.length;
-  document.getElementById('backlogTaskMeta').textContent = `今日释放 ${backlogReleased.length}`;
-  document.getElementById('longTermTaskMeta').textContent = `今日释放 ${longTermReleased.length}`;
-  document.getElementById('weakTaskMeta').textContent = `今日释放 ${weakReleased.length}`;
+  document.getElementById('dueTaskMeta').textContent = formatTaskProgressMeta(dueProgress);
+  document.getElementById('backlogTaskMeta').textContent = formatTaskProgressMeta(backlogProgress);
+  document.getElementById('longTermTaskMeta').textContent = formatTaskProgressMeta(longTermProgress);
+  document.getElementById('weakTaskMeta').textContent = formatTaskProgressMeta(weakProgress);
   document.getElementById('todayNewQuota').textContent = state.settings.dailyQuota;
   document.getElementById('totalWordCount').textContent = state.words.length;
   document.getElementById('todayPlan').innerHTML = `
-    <p>① 今日到期（0/1/3/7/14/21/30 天）：<strong>${dueWords.length}</strong> 个。</p>
-    <p>② 历史积压错词：今日释放 <strong>${legacyDue}</strong> 个。</p>
-    <p>③ 长期巩固（60/90/180 天）：今日可复习 <strong>${longTermReleased.length}</strong> 个${longTermAll.length > longTermReleased.length ? `（待巩固共 ${longTermAll.length} 个）` : ''}。</p>
-    <p>④ 当日 Again：在当前复习结束后自动循环，直到当日记住。</p>
-    <p>⑤ Hard / Again 薄弱词恢复：今日 <strong>${recentDue}</strong> 个。</p>
+    <p>① 今日到期（${coreIntervalsText} 天）：<strong>${dueProgress.completed}/${dueProgress.total}</strong>${dueProgress.done ? '，已完成。' : '。'}</p>
+    <p>② 历史积压：当前待处理 <strong>${legacyDue}</strong> 个；今日 <strong>${backlogProgress.completed}/${backlogProgress.total}</strong>${backlogProgress.done ? '，已完成。' : '。'}</p>
+    <p>③ 长期巩固（${longTermIntervalsText} 天）：当前待处理 <strong>${longTermAll.length}</strong> 个；今日 <strong>${longTermProgress.completed}/${longTermProgress.total}</strong>${longTermProgress.done ? '，已完成。' : '。'}</p>
+    <p>④ 当日 Again：在当前任务两轮结束后自动循环，直到当日记住。</p>
+    <p>⑤ Hard / Again 薄弱词恢复：当前待处理 <strong>${recentDue}</strong> 个；今日 <strong>${weakProgress.completed}/${weakProgress.total}</strong>${weakProgress.done ? '，已完成。' : '。'}</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
+  `;
+  const descendingCore = [...getCoreIntervals()].sort((a, b) => b - a).join('→') || '未设置';
+  document.getElementById('usageNotes').innerHTML = `
+    <p>1. 今日到期按 ${descendingCore} 天批次排列，批次内随机；全部先完成英文→中文，再按相同顺序完成中文→英文。</p>
+    <p>2. 首页四个任务共用同一复习界面；完成一个任务后返回今日页，再自行选择下一项。</p>
+    <p>3. 历史积压、长期巩固和薄弱词恢复分别按各自每日上限释放，互不合并；今日进度按完成两轮的单词计数。</p>
+    <p>4. Again 会在当前任务两轮结束后进入当日循环；Hard / Again 同时记录到后续薄弱词恢复。</p>
+    <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
   `;
   const duePhase1Done = batchSummary.reduce((sum, item) => sum + item.phase1Done, 0);
   const duePhase2Done = batchSummary.reduce((sum, item) => sum + item.phase2Done, 0);
@@ -2279,7 +2431,7 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
   session.roundRatings[key] = prev;
 
   state.logs.unshift({
-    id: uuid(), ts: new Date().toLocaleString('zh-CN'), word: item.word,
+    id: uuid(), ts: new Date().toLocaleString('zh-CN'), wordId: item.id, word: item.word,
     source: reviewContext.type === 'batch' ? '日历批次复习' : getReviewModeLabel(),
     pass: session.phase === 1 ? '英→中' : '中→英', rating,
     addedToWrongBook: addToWrongBook, inputValue: session.inputValue,
@@ -3347,10 +3499,19 @@ function bindEvents() {
 window.addEventListener('pagehide', () => persistNormalReviewSession());
 window.addEventListener('beforeunload', () => persistNormalReviewSession());
 
+async function cleanupLegacyPronunciationCaches() {
+  if (!('caches' in window)) return;
+  try {
+    await Promise.all(LEGACY_AUDIO_CACHE_NAMES.map(name => name === AUDIO_CACHE_NAME ? Promise.resolve(false) : caches.delete(name)));
+  } catch {
+    // Old audio caches are non-critical.
+  }
+}
+
 async function registerSW() {
   if ('serviceWorker' in navigator) {
     try {
-      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4.2');
+      await navigator.serviceWorker.register('./sw.js?v=6.0.0-beta.4.4');
     } catch {
       // ignore
     }
@@ -3365,6 +3526,7 @@ async function registerSW() {
     db = null;
     dbOpenError = error;
   }
+  await cleanupLegacyPronunciationCaches();
   const loaded = await loadState();
   selectedDate = todayStr();
   calendarCursor = new Date();

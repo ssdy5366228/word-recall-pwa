@@ -1,14 +1,14 @@
-const CACHE_NAME = 'word-recall-pwa-6.0.0-beta.4.2';
+const CACHE_NAME = 'word-recall-pwa-6.0.0-beta.4.4';
 const AUDIO_CACHE_PREFIX = 'word-recall-pronunciation-';
 const ASSETS = [
   './',
   './index.html',
-  './index.html?v=6.0.0-beta.4.2',
-  './styles.css?v=6.0.0-beta.4.2',
-  './app.js?v=6.0.0-beta.4.2',
-  './manifest.webmanifest?v=6.0.0-beta.4.2',
-  './icon-180.png?v=6.0.0-beta.4.2',
-  './icon-512.png?v=6.0.0-beta.4.2'
+  './index.html?v=6.0.0-beta.4.4',
+  './styles.css?v=6.0.0-beta.4.4',
+  './app.js?v=6.0.0-beta.4.4',
+  './manifest.webmanifest?v=6.0.0-beta.4.4',
+  './icon-180.png?v=6.0.0-beta.4.4',
+  './icon-512.png?v=6.0.0-beta.4.4'
 ];
 
 self.addEventListener('install', event => {

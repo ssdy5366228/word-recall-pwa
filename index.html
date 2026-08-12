@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.4.2" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.4.2" />
-  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.4.2" />
+  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.4.4" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.4.4" />
+  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.4.4" />
 </head>
 <body>
   <header class="app-header">
@@ -23,7 +23,7 @@
   <main class="app-main">
     <section id="dashboard" class="view active">
       <div class="stats-grid">
-        <button class="card stat-card task-card" id="openDueTaskBtn" type="button"><div class="label">今日到期 0–30天</div><div class="value" id="todayDueCount">0</div><div class="small muted">必须完成</div></button>
+        <button class="card stat-card task-card" id="openDueTaskBtn" type="button"><div class="label">今日到期 0–30天</div><div class="value" id="todayDueCount">0</div><div class="small muted" id="dueTaskMeta">今日 0/0</div></button>
         <button class="card stat-card task-card" id="openBacklogTaskBtn" type="button"><div class="label">历史积压</div><div class="value" id="todayBacklogCount">0</div><div class="small muted" id="backlogTaskMeta">今日释放 0</div></button>
         <button class="card stat-card task-card" id="openLongTermTaskBtn" type="button"><div class="label">长期巩固</div><div class="value" id="todayLongTermCount">0</div><div class="small muted" id="longTermTaskMeta">今日释放 0</div></button>
         <button class="card stat-card task-card" id="openWeakTaskBtn" type="button"><div class="label">薄弱词恢复</div><div class="value" id="todayWeakCount">0</div><div class="small muted" id="weakTaskMeta">今日释放 0</div></button>
@@ -51,7 +51,7 @@
           <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 4.2</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 4.4</div>
     </section>
 
     <section id="review" class="view">
@@ -382,6 +382,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=6.0.0-beta.4.2" defer></script>
+  <script src="./app.js?v=6.0.0-beta.4.4" defer></script>
 </body>
 </html>
