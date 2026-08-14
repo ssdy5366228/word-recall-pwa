@@ -1,14 +1,14 @@
-const CACHE_NAME = 'word-recall-pwa-6.0.0-beta.4.6.1';
+const CACHE_NAME = 'word-recall-pwa-6.0.0-beta.4.7';
 const AUDIO_CACHE_PREFIX = 'word-recall-pronunciation-';
 const ASSETS = [
   './',
   './index.html',
-  './index.html?v=6.0.0-beta.4.6.1',
-  './styles.css?v=6.0.0-beta.4.6.1',
-  './app.js?v=6.0.0-beta.4.6.1',
-  './manifest.webmanifest?v=6.0.0-beta.4.6.1',
-  './icon-180.png?v=6.0.0-beta.4.6.1',
-  './icon-512.png?v=6.0.0-beta.4.6.1'
+  './index.html?v=6.0.0-beta.4.7',
+  './styles.css?v=6.0.0-beta.4.7',
+  './app.js?v=6.0.0-beta.4.7',
+  './manifest.webmanifest?v=6.0.0-beta.4.7',
+  './icon-180.png?v=6.0.0-beta.4.7',
+  './icon-512.png?v=6.0.0-beta.4.7'
 ];
 
 self.addEventListener('install', event => {
@@ -32,6 +32,26 @@ self.addEventListener('fetch', event => {
           return response;
         })
         .catch(() => caches.match('./index.html'))
+    );
+    return;
+  }
+
+  if (url.origin === self.location.origin && url.pathname.includes('/audio/')) {
+    // Pronunciation files may be added to GitHub Pages after the app release.
+    // Use network-first, cache only successful responses, and fall back to a
+    // previously cached MP3 when offline. Never persist 404 responses.
+    event.respondWith(
+      caches.match(event.request).then(cached =>
+        fetch(event.request)
+          .then(response => {
+            if (response.ok) {
+              const cloned = response.clone();
+              caches.open(CACHE_NAME).then(cache => cache.put(event.request, cloned));
+            }
+            return response.ok ? response : (cached || response);
+          })
+          .catch(() => cached || Response.error())
+      )
     );
     return;
   }

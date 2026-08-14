@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.6.1';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.6.1';
+const APP_VERSION = 'v6.0 Beta 4.7';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.7';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -28,6 +28,7 @@ const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v2';
 const LEGACY_AUDIO_CACHE_NAMES = ['word-recall-pronunciation-v1'];
 const PRONUNCIATION_SETTINGS_VERSION = 1;
 const DICTIONARY_API_BASE = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
+const STATIC_PRONUNCIATION_ROOT = './audio';
 
 const defaultState = {
   settings: {
@@ -75,6 +76,7 @@ let autoSpeakScheduleSerial = 0;
 let reviewAudioEnabled = false;
 let normalReviewMode = 'due'; // due | backlog | longterm | weak
 const dictionaryEntryPromises = new Map();
+const localStaticAudioMisses = new Set();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
 let lastKnownMeta = null;
@@ -721,6 +723,69 @@ function normalizePronunciationWord(text) {
   return String(text || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function staticPronunciationFileName(text) {
+  const normalized = normalizePronunciationWord(text);
+  if (!normalized) return '';
+  return normalized
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9'-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function getStaticPronunciationCandidates(word, locale = state.settings.pronunciationLocale || 'en-US') {
+  const fileName = staticPronunciationFileName(word);
+  if (!fileName) return [];
+  const safeLocale = ['en-US', 'en-GB'].includes(locale) ? locale : 'en-US';
+  return [
+    `${STATIC_PRONUNCIATION_ROOT}/${safeLocale}/${encodeURIComponent(fileName)}.mp3`,
+    `${STATIC_PRONUNCIATION_ROOT}/${encodeURIComponent(fileName)}.mp3`,
+  ];
+}
+
+async function fetchLocalStaticPronunciationBlob(word, locale = state.settings.pronunciationLocale || 'en-US') {
+  const value = normalizePronunciationWord(word);
+  if (!value) return null;
+  const missKey = `${locale}:${value}`;
+  if (localStaticAudioMisses.has(missKey)) return null;
+
+  const candidates = getStaticPronunciationCandidates(value, locale);
+  for (const audioUrl of candidates) {
+    try {
+      const response = await fetch(audioUrl, {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'default',
+      });
+      if (!response.ok || response.type === 'opaque') continue;
+      const blob = await response.blob();
+      if (!blob?.size) continue;
+
+      // Copy successful bundled/same-origin audio into the pronunciation cache so
+      // later playback remains fast even if Safari evicts the normal HTTP cache.
+      if ('caches' in window) {
+        try {
+          const cache = await caches.open(AUDIO_CACHE_NAME);
+          await cache.put(
+            pronunciationCacheRequest(value, locale),
+            new Response(blob.slice(0, blob.size, blob.type || 'audio/mpeg'), {
+              headers: { 'Content-Type': blob.type || 'audio/mpeg' },
+            }),
+          );
+        } catch {
+          // Static audio playback must not depend on Cache Storage availability.
+        }
+      }
+      return { source: 'static', blob, locale, audioUrl, word: value };
+    } catch {
+      // Missing or temporarily unavailable bundled audio falls through to cache/API/TTS.
+    }
+  }
+
+  localStaticAudioMisses.add(missKey);
+  return null;
+}
+
 function getSharedPronunciationAudio() {
   if (!activePronunciationAudio) {
     const audio = new Audio();
@@ -1068,6 +1133,19 @@ async function speakWord(text, options = {}) {
   let htmlAudioBlocked = false;
 
   try {
+    // v6.0 Beta 4.7: prefer same-origin static audio shipped under /audio.
+    // If absent, continue with browser pronunciation cache -> Dictionary API -> TTS.
+    const staticPrepared = await fetchLocalStaticPronunciationBlob(value, locale);
+    if (requestId !== pronunciationRequestSerial) return false;
+    if (staticPrepared) {
+      const staticPlayback = await playPreparedPronunciation(staticPrepared, requestId, auto);
+      if (staticPlayback.played) return true;
+      if (staticPlayback.stale) return false;
+      htmlAudioBlocked = htmlAudioBlocked || Boolean(staticPlayback.blocked);
+      // Even if a bundled file exists but cannot be decoded/played, keep falling
+      // through so a cache/API/TTS source can still rescue pronunciation.
+    }
+
     let prepared = await prepareDictionaryPronunciation(value, locale);
     if (requestId !== pronunciationRequestSerial) return false;
 
@@ -1114,7 +1192,13 @@ async function speakWord(text, options = {}) {
 
 async function prefetchPronunciation(word, { notify = false } = {}) {
   try {
-    const prepared = await prepareDictionaryPronunciation(word, state.settings.pronunciationLocale || 'en-US');
+    const locale = state.settings.pronunciationLocale || 'en-US';
+    const staticPrepared = await fetchLocalStaticPronunciationBlob(word, locale);
+    if (staticPrepared) {
+      if (notify) showToast('已找到程序内置发音，并已缓存到本机');
+      return true;
+    }
+    const prepared = await prepareDictionaryPronunciation(word, locale);
     if (notify) {
       showToast(prepared.source === 'cache' ? '该词发音已在本机缓存' : prepared.blob ? '词典发音已缓存' : '已找到词典发音，使用时在线播放');
     }
