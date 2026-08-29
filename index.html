@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Word Recall" />
   <title>Word Recall</title>
-  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.4.7" />
-  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.4.7" />
-  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.4.7" />
+  <link rel="manifest" href="./manifest.webmanifest?v=6.0.0-beta.4.8" />
+  <link rel="apple-touch-icon" href="./icon-180.png?v=6.0.0-beta.4.8" />
+  <link rel="stylesheet" href="./styles.css?v=6.0.0-beta.4.8" />
 </head>
 <body>
   <header class="app-header">
@@ -51,7 +51,7 @@
           <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
         </div>
       </article>
-      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 4.7</div>
+      <div id="appVersionLine" class="small muted" style="text-align:center;margin-top:8px;">Version: v6.0 Beta 4.8</div>
     </section>
 
     <section id="review" class="view">
@@ -111,7 +111,8 @@
         <label for="exampleInput">英文例句（可选）</label>
         <textarea id="exampleInput" placeholder="例如 We need to negotiate a better price."></textarea>
         <div class="button-row wrap compact-row">
-          <button class="btn small-btn" id="generateExampleBtn" type="button">自动补充简单例句</button>
+          <button class="btn small-btn" id="generateExampleBtn" type="button">自动补充例句</button>
+          <button class="btn small-btn hidden" id="nextExampleBtn" type="button">换一句</button>
           <span class="small muted" id="exampleLookupStatus"></span>
         </div>
 
@@ -126,7 +127,7 @@
           <button class="btn" id="addBatchDemoBtn">导入 5 个示例</button>
         </div>
 
-        <p class="muted small">自动例句优先在线查询词典中的真实例句；查询不到时生成一个可编辑的本地简单例句。</p>
+        <p class="muted small">自动例句依次查询在线词典和 <a href="https://tatoeba.org/" target="_blank" rel="noopener noreferrer">Tatoeba</a>；均无结果时生成可编辑的本地简单例句。备用例句请确认是否符合目标释义。</p>
       </article>
     </section>
 
@@ -166,7 +167,8 @@
           <label for="calendarExampleInput">英文例句（可选）</label>
           <textarea id="calendarExampleInput"></textarea>
           <div class="button-row wrap compact-row">
-            <button class="btn small-btn" id="generateCalendarExampleBtn" type="button">自动补充简单例句</button>
+            <button class="btn small-btn" id="generateCalendarExampleBtn" type="button">自动补充例句</button>
+            <button class="btn small-btn hidden" id="nextCalendarExampleBtn" type="button">换一句</button>
             <span class="small muted" id="calendarExampleLookupStatus"></span>
           </div>
           <label for="calendarExampleMeaningInput">例句中文（可选）</label>
@@ -347,7 +349,8 @@
       <label for="editExampleInput">英文例句（可选）</label>
       <textarea id="editExampleInput"></textarea>
       <div class="button-row wrap compact-row">
-        <button class="btn small-btn" id="generateEditExampleBtn" type="button">自动补充简单例句</button>
+        <button class="btn small-btn" id="generateEditExampleBtn" type="button">自动补充例句</button>
+        <button class="btn small-btn hidden" id="nextEditExampleBtn" type="button">换一句</button>
         <span class="small muted" id="editExampleLookupStatus"></span>
       </div>
 
@@ -382,6 +385,6 @@
     </div>
   </div>
 
-  <script src="./app.js?v=6.0.0-beta.4.7" defer></script>
+  <script src="./app.js?v=6.0.0-beta.4.8" defer></script>
 </body>
 </html>

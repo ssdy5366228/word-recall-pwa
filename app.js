@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.7';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.7';
+const APP_VERSION = 'v6.0 Beta 4.8';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.8';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -28,6 +28,7 @@ const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v2';
 const LEGACY_AUDIO_CACHE_NAMES = ['word-recall-pronunciation-v1'];
 const PRONUNCIATION_SETTINGS_VERSION = 1;
 const DICTIONARY_API_BASE = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
+const TATOEBA_SENTENCE_API = 'https://api.tatoeba.org/v1/sentences';
 const STATIC_PRONUNCIATION_ROOT = './audio';
 
 const defaultState = {
@@ -76,6 +77,7 @@ let autoSpeakScheduleSerial = 0;
 let reviewAudioEnabled = false;
 let normalReviewMode = 'due'; // due | backlog | longterm | weak
 const dictionaryEntryPromises = new Map();
+const exampleLookupSessions = new Map();
 const localStaticAudioMisses = new Set();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
@@ -1247,7 +1249,8 @@ function generateFallbackExample(word, partOfSpeech = '', meaning = '') {
 
 async function fetchDictionaryData(word) {
   const entries = await fetchDictionaryEntries(word);
-  let example = '';
+  const examples = [];
+  const seenExamples = new Set();
   let partOfSpeech = '';
   let phonetic = '';
   for (const entry of entries) {
@@ -1256,16 +1259,133 @@ async function fetchDictionaryData(word) {
       partOfSpeech = partOfSpeech || String(meaning.partOfSpeech || '');
       for (const definition of meaning.definitions || []) {
         if (definition.example) {
-          example = String(definition.example);
-          return { example, partOfSpeech, phonetic };
+          const example = String(definition.example).trim();
+          const key = example.toLowerCase();
+          if (example && !seenExamples.has(key)) {
+            seenExamples.add(key);
+            examples.push(example);
+          }
         }
       }
     }
   }
-  return { example, partOfSpeech, phonetic };
+  return { example: examples[0] || '', examples, partOfSpeech, phonetic };
 }
 
-async function autoFillExample({ wordInputId, meaningInputId, exampleInputId, exampleMeaningInputId, statusId }) {
+function containsExactExampleTarget(sentence, word) {
+  const normalizedSentence = ` ${String(sentence || '').toLowerCase().replace(/[^a-z0-9']+/g, ' ').trim()} `;
+  const normalizedTarget = String(word || '').toLowerCase().replace(/[^a-z0-9']+/g, ' ').trim();
+  return Boolean(normalizedTarget && normalizedSentence.includes(` ${normalizedTarget} `));
+}
+
+function findChineseTranslation(item) {
+  return String((Array.isArray(item?.translations) ? item.translations : [])
+    .find(translation => ['cmn', 'zho'].includes(String(translation?.lang || '').toLowerCase()) && translation?.text)?.text || '').trim();
+}
+
+async function fetchTatoebaExamples(word) {
+  const value = normalizePronunciationWord(word);
+  if (!value) throw new Error('empty-word');
+  const params = new URLSearchParams({
+    lang: 'eng',
+    q: value,
+    word_count: '3-16',
+    is_unapproved: 'no',
+    is_orphan: 'no',
+    sort: 'relevance',
+    limit: '12',
+  });
+  params.set('showtrans:lang', 'cmn');
+  params.set('showtrans:is_direct', 'yes');
+  params.set('showtrans:is_unapproved', 'no');
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+  try {
+    const response = await fetch(`${TATOEBA_SENTENCE_API}?${params.toString()}`, {
+      method: 'GET',
+      signal: controller?.signal,
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+    if (!response.ok) throw new Error(`tatoeba-${response.status}`);
+    const payload = await response.json();
+    if (!payload || !Array.isArray(payload.data)) throw new Error('tatoeba-invalid-response');
+
+    const seen = new Set();
+    return payload.data
+      .map(item => ({
+        example: String(item?.text || '').trim(),
+        translation: findChineseTranslation(item),
+        source: 'tatoeba',
+        sourceId: Number(item?.id || 0),
+      }))
+      .filter(candidate => {
+        const key = candidate.example.toLowerCase();
+        const wordCount = candidate.example.split(/\s+/).filter(Boolean).length;
+        if (!candidate.example || seen.has(key)) return false;
+        if (wordCount < 3 || wordCount > 16 || candidate.example.length > 160) return false;
+        if (!containsExactExampleTarget(candidate.example, value)) return false;
+        seen.add(key);
+        return true;
+      });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function describeLookupError(error, sourceLabel) {
+  const message = String(error?.message || error || '');
+  if (error?.name === 'AbortError') return `${sourceLabel}查询超时`;
+  const status = message.match(/^(?:dictionary|tatoeba)-(\d{3})$/)?.[1];
+  if (status) return `${sourceLabel}返回 HTTP ${status}`;
+  if (message === 'tatoeba-invalid-response') return `${sourceLabel}返回格式异常`;
+  return `${sourceLabel}连接失败`;
+}
+
+function setExampleSwitchVisible(buttonId, visible) {
+  const button = document.getElementById(buttonId);
+  if (button) button.classList.toggle('hidden', !visible);
+}
+
+function captureExampleDraft(wordInputId) {
+  if (wordInputId === 'wordInput') captureDraftFromInputs('today');
+  if (wordInputId === 'calendarWordInput') captureDraftFromInputs('calendar');
+}
+
+function applyExampleCandidate(candidate, { wordInputId, exampleEl, translationEl }) {
+  exampleEl.value = candidate.example;
+  if (translationEl) {
+    const currentTranslation = translationEl.value.trim();
+    const previousAutoTranslation = String(translationEl.dataset.autoExampleTranslation || '').trim();
+    const mayReplaceTranslation = !currentTranslation || (previousAutoTranslation && currentTranslation === previousAutoTranslation);
+    if (mayReplaceTranslation) {
+      translationEl.value = candidate.translation || '';
+      if (candidate.translation) translationEl.dataset.autoExampleTranslation = candidate.translation;
+      else delete translationEl.dataset.autoExampleTranslation;
+    }
+  }
+  captureExampleDraft(wordInputId);
+}
+
+function setCandidateStatus(statusEl, candidate, prefix = '已写入') {
+  if (!statusEl) return;
+  statusEl.textContent = candidate.source === 'tatoeba'
+    ? `${prefix}备用例句（Tatoeba），请确认是否符合目标释义。`
+    : `${prefix}词典例句；中文请自行确认。`;
+}
+
+function uniqueExampleCandidates(existing, incoming) {
+  const seen = new Set(existing.map(candidate => candidate.example.toLowerCase()));
+  return [...existing, ...incoming.filter(candidate => {
+    const key = candidate.example.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  })];
+}
+
+async function autoFillExample({ wordInputId, meaningInputId, exampleInputId, exampleMeaningInputId, statusId, switchButtonId }) {
   const wordEl = document.getElementById(wordInputId);
   const meaningEl = document.getElementById(meaningInputId);
   const exampleEl = document.getElementById(exampleInputId);
@@ -1274,28 +1394,108 @@ async function autoFillExample({ wordInputId, meaningInputId, exampleInputId, ex
   const word = wordEl?.value.trim() || '';
   if (!word) return showToast('请先填写英文单词');
   if (exampleEl?.value.trim() && !confirm('当前已有例句，确定覆盖吗？')) return;
-  if (statusEl) statusEl.textContent = '正在查询…';
+  const sessionKey = `${exampleInputId}:${normalizePronunciationWord(word)}`;
+  exampleLookupSessions.delete(sessionKey);
+  setExampleSwitchVisible(switchButtonId, false);
+  if (statusEl) statusEl.textContent = '正在查询词典例句…';
+  let dictionaryData = null;
+  let dictionaryError = null;
   try {
-    const data = await fetchDictionaryData(word);
-    if (data.example) {
-      exampleEl.value = data.example;
-      if (statusEl) statusEl.textContent = '已写入词典例句；中文请自行确认。';
-      if (wordInputId === 'wordInput') captureDraftFromInputs('today');
-      if (wordInputId === 'calendarWordInput') captureDraftFromInputs('calendar');
+    dictionaryData = await fetchDictionaryData(word);
+    if (dictionaryData.examples.length) {
+      const candidates = dictionaryData.examples.map(example => ({ example, translation: '', source: 'dictionary', sourceId: 0 }));
+      exampleLookupSessions.set(sessionKey, { candidates, index: 0, tatoebaLoaded: false });
+      applyExampleCandidate(candidates[0], { wordInputId, exampleEl, translationEl });
+      setCandidateStatus(statusEl, candidates[0]);
+      setExampleSwitchVisible(switchButtonId, true);
       return;
     }
-    const fallback = generateFallbackExample(word, data.partOfSpeech, meaningEl?.value || '');
-    exampleEl.value = fallback.example;
-    if (translationEl && !translationEl.value.trim()) translationEl.value = fallback.translation;
-    if (statusEl) statusEl.textContent = '词典未返回例句，已写入本地简单例句。';
-  } catch {
-    const fallback = generateFallbackExample(word, '', meaningEl?.value || '');
-    exampleEl.value = fallback.example;
-    if (translationEl && !translationEl.value.trim()) translationEl.value = fallback.translation;
-    if (statusEl) statusEl.textContent = '在线查询失败，已写入可编辑的本地简单例句。';
+    if (statusEl) statusEl.textContent = '词典未返回例句，正在查询备用例句库…';
+  } catch (error) {
+    dictionaryError = error;
+    if (statusEl) statusEl.textContent = `${describeLookupError(error, '词典')}，正在查询备用例句库…`;
   }
-  if (wordInputId === 'wordInput') captureDraftFromInputs('today');
-  if (wordInputId === 'calendarWordInput') captureDraftFromInputs('calendar');
+
+  let tatoebaError = null;
+  try {
+    const candidates = await fetchTatoebaExamples(word);
+    if (candidates.length) {
+      exampleLookupSessions.set(sessionKey, { candidates, index: 0, tatoebaLoaded: true });
+      applyExampleCandidate(candidates[0], { wordInputId, exampleEl, translationEl });
+      setCandidateStatus(statusEl, candidates[0]);
+      setExampleSwitchVisible(switchButtonId, candidates.length > 1);
+      return;
+    }
+  } catch (error) {
+    tatoebaError = error;
+  }
+
+  const fallback = generateFallbackExample(word, dictionaryData?.partOfSpeech || '', meaningEl?.value || '');
+  applyExampleCandidate({ ...fallback, source: 'local' }, { wordInputId, exampleEl, translationEl });
+  if (statusEl) {
+    if (dictionaryError && tatoebaError) {
+      statusEl.textContent = `${describeLookupError(dictionaryError, '词典')}，${describeLookupError(tatoebaError, '备用例句库')}；已写入本地简单例句。`;
+    } else if (dictionaryError) {
+      statusEl.textContent = `${describeLookupError(dictionaryError, '词典')}，备用例句库无匹配结果；已写入本地简单例句。`;
+    } else if (tatoebaError) {
+      statusEl.textContent = `词典无例句，${describeLookupError(tatoebaError, '备用例句库')}；已写入本地简单例句。`;
+    } else {
+      statusEl.textContent = '在线来源均未找到例句，已写入本地简单例句。';
+    }
+  }
+}
+
+async function showNextOnlineExample({ wordInputId, exampleInputId, exampleMeaningInputId, statusId, switchButtonId }) {
+  const word = document.getElementById(wordInputId)?.value.trim() || '';
+  const exampleEl = document.getElementById(exampleInputId);
+  const translationEl = document.getElementById(exampleMeaningInputId);
+  const statusEl = document.getElementById(statusId);
+  if (!word || !exampleEl) return showToast('请先填写英文单词');
+
+  const sessionKey = `${exampleInputId}:${normalizePronunciationWord(word)}`;
+  const session = exampleLookupSessions.get(sessionKey);
+  if (!session?.candidates?.length) {
+    setExampleSwitchVisible(switchButtonId, false);
+    return showToast('请先点击“自动补充例句”');
+  }
+
+  if (session.index + 1 < session.candidates.length) {
+    session.index += 1;
+    const candidate = session.candidates[session.index];
+    applyExampleCandidate(candidate, { wordInputId, exampleEl, translationEl });
+    setCandidateStatus(statusEl, candidate, '已切换为');
+    return;
+  }
+
+  if (!session.tatoebaLoaded) {
+    if (statusEl) statusEl.textContent = '正在查询更多备用例句…';
+    try {
+      const beforeCount = session.candidates.length;
+      const extraCandidates = await fetchTatoebaExamples(word);
+      session.candidates = uniqueExampleCandidates(session.candidates, extraCandidates);
+      session.tatoebaLoaded = true;
+      if (session.candidates.length > beforeCount) {
+        session.index = beforeCount;
+        const candidate = session.candidates[session.index];
+        applyExampleCandidate(candidate, { wordInputId, exampleEl, translationEl });
+        setCandidateStatus(statusEl, candidate, '已切换为');
+        return;
+      }
+    } catch (error) {
+      if (statusEl) statusEl.textContent = `${describeLookupError(error, '备用例句库')}，暂时无法取得更多例句。`;
+      return;
+    }
+  }
+
+  if (session.candidates.length > 1) {
+    session.index = 0;
+    const candidate = session.candidates[0];
+    applyExampleCandidate(candidate, { wordInputId, exampleEl, translationEl });
+    setCandidateStatus(statusEl, candidate, '已循环回');
+  } else if (statusEl) {
+    statusEl.textContent = '暂时没有其他合适的在线例句。';
+    setExampleSwitchVisible(switchButtonId, false);
+  }
 }
 
 function getWrongEntry(wordId) {
@@ -3214,7 +3414,9 @@ function openEditModal(wordId) {
   autoResizeTextarea(document.getElementById('editMeaningInput'));
   document.getElementById('editExampleInput').value = word.example || '';
   document.getElementById('editExampleMeaningInput').value = word.exampleMeaning || '';
+  delete document.getElementById('editExampleMeaningInput').dataset.autoExampleTranslation;
   document.getElementById('editExampleLookupStatus').textContent = '';
+  setExampleSwitchVisible('nextEditExampleBtn', false);
   document.getElementById('editTagInput').value = (word.tags || []).join(', ');
   document.getElementById('editCreatedAtInput').value = word.createdAt || todayStr();
   document.getElementById('editModal').classList.remove('hidden');
@@ -3295,7 +3497,9 @@ async function handleAddTodayWord() {
   autoResizeTextarea(document.getElementById('meaningInput'));
   document.getElementById('exampleInput').value = '';
   document.getElementById('exampleMeaningInput').value = '';
+  delete document.getElementById('exampleMeaningInput').dataset.autoExampleTranslation;
   document.getElementById('exampleLookupStatus').textContent = '';
+  setExampleSwitchVisible('nextExampleBtn', false);
   document.getElementById('tagInput').value = '';
   clearDraft('today');
   showToast('已添加到今天');
@@ -3315,7 +3519,9 @@ async function handleAddWordToSelectedDate() {
   autoResizeTextarea(document.getElementById('calendarMeaningInput'));
   document.getElementById('calendarExampleInput').value = '';
   document.getElementById('calendarExampleMeaningInput').value = '';
+  delete document.getElementById('calendarExampleMeaningInput').dataset.autoExampleTranslation;
   document.getElementById('calendarExampleLookupStatus').textContent = '';
+  setExampleSwitchVisible('nextCalendarExampleBtn', false);
   document.getElementById('calendarTagInput').value = '';
   clearDraft('calendar');
   showToast(`已添加到 ${selectedDate}`);
@@ -3363,6 +3569,14 @@ function bindEvents() {
     exampleInputId: 'exampleInput',
     exampleMeaningInputId: 'exampleMeaningInput',
     statusId: 'exampleLookupStatus',
+    switchButtonId: 'nextExampleBtn',
+  }));
+  document.getElementById('nextExampleBtn').addEventListener('click', () => showNextOnlineExample({
+    wordInputId: 'wordInput',
+    exampleInputId: 'exampleInput',
+    exampleMeaningInputId: 'exampleMeaningInput',
+    statusId: 'exampleLookupStatus',
+    switchButtonId: 'nextExampleBtn',
   }));
 
   document.getElementById('addBatchDemoBtn').addEventListener('click', async () => {
@@ -3407,6 +3621,14 @@ function bindEvents() {
     exampleInputId: 'calendarExampleInput',
     exampleMeaningInputId: 'calendarExampleMeaningInput',
     statusId: 'calendarExampleLookupStatus',
+    switchButtonId: 'nextCalendarExampleBtn',
+  }));
+  document.getElementById('nextCalendarExampleBtn').addEventListener('click', () => showNextOnlineExample({
+    wordInputId: 'calendarWordInput',
+    exampleInputId: 'calendarExampleInput',
+    exampleMeaningInputId: 'calendarExampleMeaningInput',
+    statusId: 'calendarExampleLookupStatus',
+    switchButtonId: 'nextCalendarExampleBtn',
   }));
 
   const editMeaningInputEl = document.getElementById('editMeaningInput');
@@ -3418,7 +3640,21 @@ function bindEvents() {
     exampleInputId: 'editExampleInput',
     exampleMeaningInputId: 'editExampleMeaningInput',
     statusId: 'editExampleLookupStatus',
+    switchButtonId: 'nextEditExampleBtn',
   }));
+  document.getElementById('nextEditExampleBtn').addEventListener('click', () => showNextOnlineExample({
+    wordInputId: 'editWordInput',
+    exampleInputId: 'editExampleInput',
+    exampleMeaningInputId: 'editExampleMeaningInput',
+    statusId: 'editExampleLookupStatus',
+    switchButtonId: 'nextEditExampleBtn',
+  }));
+
+  ['exampleMeaningInput', 'calendarExampleMeaningInput', 'editExampleMeaningInput'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', event => {
+      delete event.currentTarget.dataset.autoExampleTranslation;
+    });
+  });
 
   document.getElementById('librarySearchInput').addEventListener('input', e => {
     librarySearch = e.target.value || '';
