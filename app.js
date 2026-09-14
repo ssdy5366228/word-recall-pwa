@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.8';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.8';
+const APP_VERSION = 'v6.0 Beta 4.9';
+const APP_VERSION_NUMBER = '6.0.0-beta.4.9';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -27,6 +27,8 @@ const RECOVERY_DAYS = { Easy: 30, Good: 14, Hard: 3, Again: 1 };
 const AUDIO_CACHE_NAME = 'word-recall-pronunciation-v2';
 const LEGACY_AUDIO_CACHE_NAMES = ['word-recall-pronunciation-v1'];
 const PRONUNCIATION_SETTINGS_VERSION = 1;
+const PRONUNCIATION_IDLE_REWARM_MS = 45000;
+const PRONUNCIATION_WARMUP_MS = 260;
 const DICTIONARY_API_BASE = 'https://api.dictionaryapi.dev/api/v2/entries/en/';
 const TATOEBA_SENTENCE_API = 'https://api.tatoeba.org/v1/sentences';
 const STATIC_PRONUNCIATION_ROOT = './audio';
@@ -70,6 +72,7 @@ let lastAutoSpokenKey = '';
 let activePronunciationAudio = null;
 let pronunciationAudioUnlocked = false;
 let pronunciationUnlockPromise = null;
+let lastPronunciationActivityAt = 0;
 let activePronunciationObjectUrl = '';
 let pronunciationRequestSerial = 0;
 let autoPlaybackBlockedToastShown = false;
@@ -795,28 +798,48 @@ function getSharedPronunciationAudio() {
     audio.playsInline = true;
     audio.setAttribute('playsinline', '');
     audio.setAttribute('webkit-playsinline', '');
+    const markActivity = () => { lastPronunciationActivityAt = Date.now(); };
+    audio.addEventListener('playing', markActivity);
+    audio.addEventListener('timeupdate', markActivity);
+    audio.addEventListener('ended', markActivity);
     activePronunciationAudio = audio;
   }
   return activePronunciationAudio;
 }
 
-function unlockPronunciationAudio() {
-  if (pronunciationAudioUnlocked) return Promise.resolve(true);
+function pronunciationOutputNeedsWarmup() {
+  if (!pronunciationAudioUnlocked || !lastPronunciationActivityAt) return true;
+  return Date.now() - lastPronunciationActivityAt >= PRONUNCIATION_IDLE_REWARM_MS;
+}
+
+function unlockPronunciationAudio({ force = false } = {}) {
+  if (!force && !pronunciationOutputNeedsWarmup()) return Promise.resolve(true);
   if (pronunciationUnlockPromise) return pronunciationUnlockPromise;
   const audio = getSharedPronunciationAudio();
   const silentWav = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YSADAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
   try {
+    audio.pause();
+    audio.loop = true;
     audio.src = silentWav;
     // Use an UNMUTED silent-content WAV so a successful play follows the same
-    // permission path as real pronunciation audio on iPhone/Safari.
+    // permission path as real pronunciation audio on iPhone/Safari. Keep it
+    // running briefly: play() resolving alone unlocks permission but may not
+    // fully wake an idle speaker/Bluetooth output path before the first phoneme.
     audio.muted = false;
-    pronunciationUnlockPromise = audio.play().then(() => {
+    pronunciationUnlockPromise = audio.play().then(() => new Promise(resolve => {
+      setTimeout(resolve, PRONUNCIATION_WARMUP_MS);
+    })).then(() => {
       audio.pause();
+      audio.loop = false;
       audio.currentTime = 0;
       audio.muted = false;
       pronunciationAudioUnlocked = true;
+      lastPronunciationActivityAt = Date.now();
       return true;
-    }).catch(() => false).finally(() => {
+    }).catch(() => {
+      audio.loop = false;
+      return false;
+    }).finally(() => {
       pronunciationUnlockPromise = null;
     });
     return pronunciationUnlockPromise;
@@ -1024,7 +1047,15 @@ async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = fal
   if (requestId !== pronunciationRequestSerial) return { played: false, stale: true };
   const audio = getSharedPronunciationAudio();
   try {
+    // Browsers and Bluetooth devices can suspend their output path while the
+    // page remains visible. Re-warm only after a real idle interval so normal
+    // consecutive review playback has no added delay.
+    if (pronunciationOutputNeedsWarmup()) {
+      await unlockPronunciationAudio();
+      if (requestId !== pronunciationRequestSerial) return { played: false, stale: true };
+    }
     audio.pause();
+    audio.loop = false;
     audio.currentTime = 0;
     audio.muted = false;
     if (activePronunciationObjectUrl) {
@@ -1039,6 +1070,7 @@ async function playHtmlAudio({ blob = null, audioUrl = '', requestId, auto = fal
     }
     await audio.play();
     pronunciationAudioUnlocked = true;
+    lastPronunciationActivityAt = Date.now();
     return { played: true, blocked: false };
   } catch (error) {
     const blocked = error?.name === 'NotAllowedError';
@@ -1178,7 +1210,14 @@ async function speakWord(text, options = {}) {
 
   // IMPORTANT: even when HTMLAudioElement.play() was blocked by Safari,
   // do NOT return here. Always give SpeechSynthesis a chance to rescue audio.
+  // If dictionary lookup failed before HTML audio was attempted, this also
+  // wakes an idle output route before the first system-speech phoneme.
+  if (pronunciationOutputNeedsWarmup()) {
+    await unlockPronunciationAudio();
+    if (requestId !== pronunciationRequestSerial) return false;
+  }
   const usedSystem = await speakWithSystemVoice(value, { auto });
+  if (usedSystem) lastPronunciationActivityAt = Date.now();
   if (!auto) {
     if (usedSystem) {
       showToast(htmlAudioBlocked
@@ -3866,6 +3905,7 @@ window.addEventListener('pagehide', () => {
   reviewAudioEnabled = false;
   pronunciationAudioUnlocked = false;
   pronunciationUnlockPromise = null;
+  lastPronunciationActivityAt = 0;
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -3874,6 +3914,7 @@ document.addEventListener('visibilitychange', () => {
     reviewAudioEnabled = false;
     pronunciationAudioUnlocked = false;
     pronunciationUnlockPromise = null;
+    lastPronunciationActivityAt = 0;
   }
 });
 window.addEventListener('beforeunload', () => persistNormalReviewSession());
