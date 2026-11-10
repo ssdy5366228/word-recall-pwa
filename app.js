@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.1 Beta 1';
-const APP_VERSION_NUMBER = '6.1.0-beta.1';
+const APP_VERSION = 'v6.1 Beta 2';
+const APP_VERSION_NUMBER = '6.1.0-beta.2';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -1871,7 +1871,8 @@ function sanitizeImportedState(parsed) {
       const existing = seen.get(wordId);
       const normalized = {
         wordId,
-        againRecovery: item.againRecovery === true || (item.againRecovery == null && Boolean(item.lastErrorDate)),
+        // Historical Again dates do not enroll legacy words in the new recovery plan.
+        againRecovery: item.againRecovery === true,
         recoverySuccessDate: String(item.recoverySuccessDate || ''),
         sameDayRetestAt: Number(item.sameDayRetestAt || 0),
         errorCount: item.errorCount != null || item.totalErrorCount != null ? Math.max(0, Number(item.errorCount ?? item.totalErrorCount ?? 0)) : 1,
@@ -2249,17 +2250,8 @@ async function loadState() {
 
   const isMigration = selected.source.startsWith('legacy-');
   const isVersionUpgrade = Boolean(selected.metadata.appVersion) && selected.metadata.appVersion !== APP_VERSION_NUMBER;
-  if (isVersionUpgrade) {
-    state.wrongBook.forEach(entry => {
-      if (entry.active !== false && entry.lastErrorDate && selected.metadata.appVersion !== APP_VERSION_NUMBER) {
-        entry.againRecovery = true;
-        entry.masteryStreak = 0;
-        entry.recoveryStage = 0;
-        entry.recoverySuccessDate = '';
-        entry.nextReviewDate = todayStr();
-      }
-    });
-  }
+  // Version upgrades preserve all existing scheduling fields. Only a new Again
+  // rating enrolls a word; damaged Beta 1 dates must be restored from a backup.
   if (isMigration || isVersionUpgrade) {
     const migrationSource = isVersionUpgrade ? `${selected.source}:${selected.metadata.appVersion}->${APP_VERSION_NUMBER}` : selected.source;
     await createSnapshot(`migration-before:${migrationSource}`, state);
