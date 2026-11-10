@@ -1,5 +1,5 @@
-const APP_VERSION = 'v6.0 Beta 4.9';
-const APP_VERSION_NUMBER = '6.0.0-beta.4.9';
+const APP_VERSION = 'v6.1 Beta 1';
+const APP_VERSION_NUMBER = '6.1.0-beta.1';
 const SCHEMA_VERSION = 7;
 const DB_NAME = 'word_recall_pwa_db';
 const DB_VERSION = 7;
@@ -81,7 +81,7 @@ let reviewAudioEnabled = false;
 let normalReviewMode = 'due'; // due | backlog | longterm | weak
 const dictionaryEntryPromises = new Map();
 const exampleLookupSessions = new Map();
-const localStaticAudioMisses = new Set();
+const localStaticAudioMisses = new Map();
 let saveQueue = Promise.resolve();
 let currentRevision = 0;
 let lastKnownMeta = null;
@@ -109,6 +109,8 @@ function openDB() {
   return new Promise((resolve, reject) => {
     if (!('indexedDB' in window)) return reject(new Error('IndexedDB 不可用'));
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    let expired = false;
+    const timer = setTimeout(() => { expired = true; reject(new Error('IndexedDB 打开超时')); }, 5000);
     req.onupgradeneeded = event => {
       const database = event.target.result;
       if (!database.objectStoreNames.contains(STORE_APP)) database.createObjectStore(STORE_APP);
@@ -116,9 +118,9 @@ function openDB() {
       if (!database.objectStoreNames.contains(STORE_SNAPSHOTS)) database.createObjectStore(STORE_SNAPSHOTS, { keyPath: 'id' });
       if (!database.objectStoreNames.contains(STORE_META)) database.createObjectStore(STORE_META);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
-    req.onblocked = () => reject(new Error('IndexedDB 升级被其他页面阻塞'));
+    req.onsuccess = () => { clearTimeout(timer); if (expired) { req.result.close(); return; } req.result.onversionchange = () => req.result.close(); resolve(req.result); };
+    req.onerror = () => { clearTimeout(timer); reject(req.error || new Error('IndexedDB 打开失败')); };
+    req.onblocked = () => { clearTimeout(timer); expired = true; reject(new Error('IndexedDB 升级被其他页面阻塞')); };
   });
 }
 
@@ -362,6 +364,17 @@ async function persistPreparedState(prepared, options = {}) {
     storageHealth.localStorage = 'error';
   }
 
+  if (!results.indexedDB) {
+    try {
+      db?.close();
+      db = await openDB();
+      await dbWriteCurrentAndMeta(envelope, metadata);
+      results.indexedDB = true;
+      storageHealth.indexedDB = 'ok';
+    } catch (error) {
+      results.errors.push('IndexedDB 重连失败：' + (error?.message || error));
+    }
+  }
   if (!results.indexedDB && !results.localStorage) {
     appLocked = true;
     throw new Error(`所有本地存储均保存失败。${results.errors.join('；')}`);
@@ -421,7 +434,10 @@ async function createSnapshot(reason, sourceState = state) {
   }
   try {
     const localItems = readLocalSnapshotList().filter(item => item.id !== snapshot.id);
-    writeLocalSnapshotList([snapshot, ...localItems]);
+    const candidates = [snapshot, ...localItems].slice(0, MAX_LOCAL_FALLBACK_SNAPSHOTS);
+    while (candidates.length > 1 && JSON.stringify(candidates).length > 400000) candidates.pop();
+    if (JSON.stringify(candidates).length <= 400000) writeLocalSnapshotList(candidates);
+    else if (!stored) throw new Error('快照过大，未写入 localStorage');
     stored = true;
   } catch {
     // At least the IDB copy may still exist.
@@ -472,7 +488,7 @@ async function getSnapshotById(id) {
 }
 
 function downloadJSONFile(payload, filename) {
-  const text = JSON.stringify(payload, null, 2);
+  const text = JSON.stringify(payload);
   const blob = new Blob(['\ufeff' + text], { type: 'application/json;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -490,7 +506,8 @@ async function restoreSnapshot(id) {
   const shape = validateRawStateShape(snapshot.state);
   if (!shape.ok) throw new Error(`快照无效：${shape.error}`);
   const prepared = sanitizeImportedState(snapshot.state);
-  if (snapshot.checksum && snapshot.checksum !== checksumState(prepared)) throw new Error('快照校验失败');
+  if (prepared.words.length === 0 && !confirm('警告：这是0词快照，恢复将清空当前词库。仍要继续吗？')) throw new Error('已取消空快照恢复');
+  if (snapshot.checksum && snapshot.checksum !== checksumState(prepared) && snapshot.checksum !== fnv1a(JSON.stringify(snapshot.state))) throw new Error('快照校验失败');
   await createSnapshot('restore-before', state);
   await saveState(prepared, { allowLargeDecrease: true, skipDailySnapshot: true });
   resetNormalReviewSession();
@@ -524,6 +541,7 @@ function bindFatalRecoveryEvents() {
       storageHealth,
       lastKnownMeta,
       snapshots: snapshotSummaries,
+      recoveryState: state,
     }, `word_recall_diagnostic_${todayStr()}.json`);
   });
   document.getElementById('fatalImportInput')?.addEventListener('change', async event => {
@@ -752,7 +770,7 @@ async function fetchLocalStaticPronunciationBlob(word, locale = state.settings.p
   const value = normalizePronunciationWord(word);
   if (!value) return null;
   const missKey = `${locale}:${value}`;
-  if (localStaticAudioMisses.has(missKey)) return null;
+  if (Date.now() - (localStaticAudioMisses.get(missKey) || 0) < 30000) return null;
 
   const candidates = getStaticPronunciationCandidates(value, locale);
   for (const audioUrl of candidates) {
@@ -787,7 +805,7 @@ async function fetchLocalStaticPronunciationBlob(word, locale = state.settings.p
     }
   }
 
-  localStaticAudioMisses.add(missKey);
+  localStaticAudioMisses.set(missKey, Date.now());
   return null;
 }
 
@@ -1581,6 +1599,9 @@ function recordWeakOrError(wordId, rating, usedHint = false) {
       word.totalErrorCount = Math.max(0, Number(word.totalErrorCount || 0)) + 1;
       entry.lastErrorDate = todayStr();
     }
+    entry.againRecovery = true;
+    entry.recoverySuccessDate = '';
+    entry.sameDayRetestAt = 0;
     entry.nextReviewDate = addDays(todayStr(), 1);
   } else {
     if (entry.lastWeakDate !== todayStr()) {
@@ -1589,7 +1610,7 @@ function recordWeakOrError(wordId, rating, usedHint = false) {
       if (usedHint) word.hintUseCount = Math.max(0, Number(word.hintUseCount || 0)) + 1;
       entry.lastWeakDate = todayStr();
     }
-    entry.nextReviewDate = addDays(todayStr(), usedHint ? 1 : RECOVERY_DAYS.Hard);
+    entry.nextReviewDate = addDays(todayStr(), usedHint || entry.againRecovery ? 1 : RECOVERY_DAYS.Hard);
   }
 }
 
@@ -1604,9 +1625,27 @@ function settleRecoveryReview(wordId, rating, usedHint = false) {
     return finalRating;
   }
   if (entry.lastErrorDate === todayStr()) {
+    if (!entry.sameDayRetestAt) entry.sameDayRetestAt = Date.now() + 10 * 60 * 1000;
+    else if (entry.sameDayRetestAt > 0 && Date.now() >= entry.sameDayRetestAt) entry.sameDayRetestAt = -1;
     entry.nextReviewDate = addDays(todayStr(), 1);
     return finalRating;
   }
+  if (entry.againRecovery) {
+    if (entry.recoverySuccessDate === todayStr()) return finalRating;
+    entry.masteryStreak = entry.recoverySuccessDate === addDays(todayStr(), -1) ? entry.masteryStreak + 1 : 1;
+    entry.recoverySuccessDate = todayStr();
+    entry.sameDayRetestAt = 0;
+    entry.recoveryStage = entry.masteryStreak;
+    entry.nextReviewDate = addDays(todayStr(), entry.masteryStreak >= 3 ? 7 : 1);
+    if (entry.masteryStreak >= 3) {
+      entry.againRecovery = false;
+      entry.masteryStreak = 0;
+      entry.recoveryStage = 0;
+    }
+    return finalRating;
+  }
+  if (entry.recoverySuccessDate === todayStr()) return finalRating;
+  entry.recoverySuccessDate = todayStr();
   entry.masteryStreak = Math.max(0, Number(entry.masteryStreak || 0)) + 1;
   entry.recoveryStage = Math.max(0, Number(entry.recoveryStage || 0)) + (finalRating === 'Easy' ? 2 : 1);
   if (entry.masteryStreak >= 3) {
@@ -1832,6 +1871,9 @@ function sanitizeImportedState(parsed) {
       const existing = seen.get(wordId);
       const normalized = {
         wordId,
+        againRecovery: item.againRecovery === true || (item.againRecovery == null && Boolean(item.lastErrorDate)),
+        recoverySuccessDate: String(item.recoverySuccessDate || ''),
+        sameDayRetestAt: Number(item.sameDayRetestAt || 0),
         errorCount: item.errorCount != null || item.totalErrorCount != null ? Math.max(0, Number(item.errorCount ?? item.totalErrorCount ?? 0)) : 1,
         weakCount: Math.max(0, Number(item.weakCount || 0)),
         active: item.active !== false,
@@ -1918,18 +1960,24 @@ function getWrongBookIds() {
   return new Set((state.wrongBook || []).filter(item => item.active !== false).map(item => item.wordId));
 }
 
+function isRecoveryDue(entry) {
+  return !entry.nextReviewDate || entry.nextReviewDate <= todayStr()
+    || (entry.lastErrorDate === todayStr() && entry.sameDayRetestAt > 0 && entry.sameDayRetestAt <= Date.now());
+}
+
 function getWrongBookItems(options = {}) {
   const dueOnly = Boolean(options.dueOnly);
   const wordMap = new Map(state.words.map(word => [word.id, word]));
   return (state.wrongBook || [])
     .filter(item => item.active !== false)
-    .filter(item => !dueOnly || !item.nextReviewDate || item.nextReviewDate <= todayStr())
+    .filter(item => !dueOnly || isRecoveryDue(item))
     .map(item => {
       const word = wordMap.get(item.wordId);
       return word ? { ...word, ...item, id: word.id, errorCount: item.errorCount } : null;
     })
     .filter(Boolean)
     .sort((a, b) => {
+      if (dueOnly && Boolean(a.againRecovery) !== Boolean(b.againRecovery)) return a.againRecovery ? -1 : 1;
       const sourceDiff = (a.source === 'recent' ? 0 : 1) - (b.source === 'recent' ? 0 : 1);
       if (dueOnly && sourceDiff !== 0) return sourceDiff;
       const dateDiff = String(a.nextReviewDate || '').localeCompare(String(b.nextReviewDate || ''));
@@ -2201,6 +2249,17 @@ async function loadState() {
 
   const isMigration = selected.source.startsWith('legacy-');
   const isVersionUpgrade = Boolean(selected.metadata.appVersion) && selected.metadata.appVersion !== APP_VERSION_NUMBER;
+  if (isVersionUpgrade) {
+    state.wrongBook.forEach(entry => {
+      if (entry.active !== false && entry.lastErrorDate && selected.metadata.appVersion !== APP_VERSION_NUMBER) {
+        entry.againRecovery = true;
+        entry.masteryStreak = 0;
+        entry.recoveryStage = 0;
+        entry.recoverySuccessDate = '';
+        entry.nextReviewDate = todayStr();
+      }
+    });
+  }
   if (isMigration || isVersionUpgrade) {
     const migrationSource = isVersionUpgrade ? `${selected.source}:${selected.metadata.appVersion}->${APP_VERSION_NUMBER}` : selected.source;
     await createSnapshot(`migration-before:${migrationSource}`, state);
@@ -2256,8 +2315,10 @@ async function runReviewSubmission(kind, operation) {
   showToast('处理中…');
   try {
     await operation();
-    persistNormalReviewSession();
     await saveState();
+    reviewSubmitting = false;
+    persistNormalReviewSession();
+    reviewSubmitting = true;
     if (kind === 'normal') {
       resetWrongBookSession();
       renderReview();
@@ -2269,6 +2330,9 @@ async function runReviewSubmission(kind, operation) {
     state = beforeState;
     reviewSession = beforeNormal;
     wrongBookSession = beforeWrong;
+    reviewSubmitting = false;
+    persistNormalReviewSession();
+    reviewSubmitting = true;
     showToast(`保存失败：${error?.message || error}`);
     if (appLocked) {
       setFatalDataError('评分保存失败，且两份本地存储均不可用。程序已锁定，避免继续产生未保存操作。', { error: error?.message || String(error) });
@@ -2304,7 +2368,7 @@ function writeReviewSessions(sessions) {
 }
 
 function persistNormalReviewSession() {
-  if (!reviewSession || !reviewSession.contextKey) return;
+  if (reviewSubmitting || !reviewSession || !reviewSession.contextKey) return;
   const sessions = readReviewSessions();
   if (reviewSession.completed) delete sessions[reviewSession.contextKey];
   else sessions[reviewSession.contextKey] = cloneValue(reviewSession);
@@ -2314,7 +2378,7 @@ function persistNormalReviewSession() {
 function restoreNormalReviewSession(contextKey = getReviewContextKey()) {
   const sessions = readReviewSessions();
   const saved = sessions[contextKey];
-  if (!saved || saved.completed || saved.contextKey !== contextKey) return null;
+  if (!saved || saved.completed || saved.contextKey !== contextKey || saved.sessionDate !== todayStr()) return null;
   const validIds = new Set(state.words.map(word => word.id));
   const queueIds = Array.isArray(saved.queueIds) ? saved.queueIds.filter(id => validIds.has(id)) : [];
   const currentPoolIds = Array.isArray(saved.currentPoolIds) ? saved.currentPoolIds.filter(id => validIds.has(id)) : [];
@@ -2327,6 +2391,7 @@ function restoreNormalReviewSession(contextKey = getReviewContextKey()) {
 }
 
 function clearStoredNormalReviewSession(contextKey = null) {
+  if (reviewSubmitting) return;
   if (!contextKey) {
     try { localStorage.removeItem(LS_REVIEW_SESSIONS_KEY); } catch {}
     return;
@@ -2364,10 +2429,10 @@ function getTodayBacklogWords() {
 
 function getTodayWeakWords() {
   const limit = Math.max(0, Number(state.settings.weakDailyLimit || 0));
-  const completed = getTodayCompletedTaskKeys('weak').size;
+  const completed = [...getTodayCompletedTaskKeys('weak')].filter(id => !getWrongEntry(id)?.againRecovery).length;
   const remainingLimit = Math.max(0, limit - completed);
   const items = getWrongBookItems({ dueOnly: true }).filter(item => item.source === 'recent');
-  return remainingLimit === 0 ? [] : items.slice(0, remainingLimit);
+  return [...items.filter(item => item.againRecovery), ...items.filter(item => !item.againRecovery).slice(0, remainingLimit)];
 }
 
 function getReviewModeLabel(mode = normalReviewMode) {
@@ -2408,6 +2473,7 @@ function startNormalReviewSession() {
   const orderedIds = buildStableNormalOrder(queue);
   reviewSession = {
     type: 'normal',
+    sessionDate: todayStr(),
     contextKey: getReviewContextKey(),
     queueIds: queue.map(w => w.id),
     orderedIds,
@@ -2433,6 +2499,7 @@ function startWrongBookSession(queueOverride = null, remedialRound = 0) {
   const queue = queueOverride || getWrongBookItems({ dueOnly: true });
   wrongBookSession = {
     type: 'wrongbook',
+    sessionDate: todayStr(),
     queueIds: queue.map(w => w.id),
     batchSize: getBatchSize(),
     phase: 1,
@@ -2454,6 +2521,7 @@ function startWrongBookSession(queueOverride = null, remedialRound = 0) {
 }
 
 function ensureNormalReviewSession() {
+  if (reviewSession && reviewSession.sessionDate !== todayStr()) reviewSession = null;
   const contextKey = getReviewContextKey();
   if (!reviewSession || reviewSession.contextKey !== contextKey) {
     reviewSession = restoreNormalReviewSession(contextKey);
@@ -2468,6 +2536,7 @@ function ensureNormalReviewSession() {
 }
 
 function ensureWrongBookSession() {
+  if (wrongBookSession && wrongBookSession.sessionDate !== todayStr()) wrongBookSession = null;
   if (!wrongBookSession || wrongBookSession.batchSize !== getBatchSize()) {
     startWrongBookSession();
     return;
@@ -2523,7 +2592,9 @@ function renderDashboard() {
   const dueProgress = getTodayTaskProgress('due', dueWords.length);
   const backlogProgress = getTodayTaskProgress('backlog', legacyDue, state.settings.backlogDailyLimit);
   const longTermProgress = getTodayTaskProgress('longterm', longTermAll.length, state.settings.longTermDailyLimit);
-  const weakProgress = getTodayTaskProgress('weak', recentDue, state.settings.weakDailyLimit);
+  const weakCompleted = getTodayCompletedTaskKeys('weak').size;
+  const pendingRetests = activeWrong.filter(item => item.lastErrorDate === today && item.sameDayRetestAt > Date.now());
+  const weakProgress = { completed: weakCompleted, total: weakCompleted + weakReleased.length, done: weakReleased.length === 0 && pendingRetests.length === 0 };
   const coreIntervalsText = getCoreIntervals().join('/') || '未设置';
   const longTermIntervalsText = getLongTermIntervals().join('/') || '未设置';
 
@@ -2541,16 +2612,16 @@ function renderDashboard() {
     <p>① 今日到期（${coreIntervalsText} 天）：<strong>${dueProgress.completed}/${dueProgress.total}</strong>${dueProgress.done ? '，已完成。' : '。'}</p>
     <p>② 历史积压：当前待处理 <strong>${legacyDue}</strong> 个；今日 <strong>${backlogProgress.completed}/${backlogProgress.total}</strong>${backlogProgress.done ? '，已完成。' : '。'}</p>
     <p>③ 长期巩固（${longTermIntervalsText} 天）：当前待处理 <strong>${longTermAll.length}</strong> 个；今日 <strong>${longTermProgress.completed}/${longTermProgress.total}</strong>${longTermProgress.done ? '，已完成。' : '。'}</p>
-    <p>④ 当日 Again：在当前任务两轮结束后自动循环，直到当日记住。</p>
-    <p>⑤ Hard / Again 薄弱词恢复：当前待处理 <strong>${recentDue}</strong> 个；今日 <strong>${weakProgress.completed}/${weakProgress.total}</strong>${weakProgress.done ? '，已完成。' : '。'}</p>
+    <p>④ 当日 Again：先完成补救，10分钟后返回薄弱词恢复做独立复测。待复测 ${pendingRetests.length} 个。次日起连续3天各完成一次；中断或答错重新计数。</p>
+    <p>⑤ 薄弱词恢复（Again到期不受额度限制）：当前待处理 <strong>${recentDue}</strong> 个；今日 <strong>${weakProgress.completed}/${weakProgress.total}</strong>${weakProgress.done ? '，已完成。' : '。'}</p>
     <p>今天已录入新词 <strong>${newCount}</strong> / ${state.settings.dailyQuota}。${newCount < state.settings.dailyQuota ? `还可新增 <strong>${state.settings.dailyQuota - newCount}</strong> 个。` : '<span style="color:#059669">今日新词目标已达到。</span>'}</p>
   `;
   const descendingCore = [...getCoreIntervals()].sort((a, b) => b - a).join('→') || '未设置';
   document.getElementById('usageNotes').innerHTML = `
     <p>1. 今日到期按 ${descendingCore} 天批次排列，批次内随机；全部先完成英文→中文，再按相同顺序完成中文→英文。</p>
     <p>2. 首页四个任务共用同一复习界面；完成一个任务后返回今日页，再自行选择下一项。</p>
-    <p>3. 历史积压、长期巩固和薄弱词恢复分别按各自每日上限释放，互不合并；今日进度按完成两轮的单词计数。</p>
-    <p>4. Again 会在当前任务两轮结束后进入当日循环；Hard / Again 同时记录到后续薄弱词恢复。</p>
+    <p>3. 历史积压、长期巩固和普通薄弱词按每日上限释放；Again恢复词额外全部释放；今日进度按完成两轮的单词计数。</p>
+    <p>4. Again 会在当前任务两轮结束后进入当日循环；Hard / Again 同时记录到后续薄弱词恢复；Again连续3天成功后7天再验证。</p>
     <p>5. 轻提示后本题最高只能判 Hard；“不会，显示答案”自动判 Again。</p>
   `;
   const duePhase1Done = batchSummary.reduce((sum, item) => sum + item.phase1Done, 0);
@@ -2852,8 +2923,11 @@ async function finishNormalReviewStep(rating, addToWrongBook) {
     }
     if (normalReviewMode === 'backlog' || normalReviewMode === 'weak') {
       settleRecoveryReview(id, finalRating, usedHint);
+      if (getCoreDueInfo(word, todayStr())) advanceNormalSchedule(word, finalRating, usedHint);
       return;
     }
+    const recovery = getWrongEntry(id);
+    if (recovery && isRecoveryDue(recovery) && !['Hard', 'Again'].includes(finalRating)) settleRecoveryReview(id, finalRating, usedHint);
     if (normalReviewMode === 'due') {
       const info = getCoreDueInfo(word, todayStr());
       if (info) {
@@ -3056,6 +3130,8 @@ async function finishWrongBookReviewStep(rating) {
   let finalRating = capRatingForHint(worseRating(result.phase1, result.phase2), usedHint);
   if (hadAgain) finalRating = 'Again';
   settleRecoveryReview(item.id, finalRating, usedHint);
+  const normalWord = state.words.find(word => word.id === item.id);
+  if (normalWord && finalRating !== 'Again' && getCoreDueInfo(normalWord, todayStr())) advanceNormalSchedule(normalWord, finalRating, usedHint);
   if (finalRating === 'Again') session.remedialIds.push(item.id);
   delete session.roundRatings[item.id];
 
@@ -3781,36 +3857,22 @@ function bindEvents() {
   });
 
   document.getElementById('exportBtn').addEventListener('click', () => {
-    const jsonText = JSON.stringify(buildExportPayload(), null, 2);
-    exportPreviewText = jsonText;
-    const blob = new Blob(['﻿' + jsonText], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    if (exportDownloadUrl) URL.revokeObjectURL(exportDownloadUrl);
-    exportDownloadUrl = url;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `word_recall_backup_${todayStr()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    dataMessage = '已生成 JSON 下载。';
+    exportPreviewText = '';
+    downloadJSONFile(buildExportPayload(), 'word_recall_backup_' + todayStr() + '.json');
+    dataMessage = '已生成完整 JSON 下载；再次下载请重新点击导出。';
     renderSettings();
-    showToast('已生成导出数据');
   });
   document.getElementById('showExportBtn').addEventListener('click', () => {
-    exportPreviewText = JSON.stringify(buildExportPayload(), null, 2);
-    dataMessage = '已在下方显示导出 JSON 内容。';
+    exportPreviewText = JSON.stringify(buildExportPayload(), null, 2).slice(0, 12000);
+    dataMessage = '仅预览前12000字符，不可用于恢复。请下载或复制完整备份。';
     renderSettings();
   });
   document.getElementById('copyExportBtn').addEventListener('click', async () => {
     try {
-      const text = exportPreviewText || JSON.stringify(buildExportPayload(), null, 2);
-      await navigator.clipboard.writeText(text);
-      exportPreviewText = text;
-      dataMessage = 'JSON 内容已复制到剪贴板。';
-    } catch {
-      dataMessage = '复制失败，请先显示 JSON，再手动复制。';
-    }
+      await navigator.clipboard.writeText(JSON.stringify(buildExportPayload()));
+      dataMessage = '已复制完整备份。';
+    } catch { dataMessage = '复制失败，请下载完整 JSON 备份。'; }
+    exportPreviewText = '';
     renderSettings();
   });
 
@@ -3956,6 +4018,7 @@ async function registerSW() {
     registerSW();
     return;
   }
+  bindFatalRecoveryEvents();
   bindEvents();
   applyDraftToInputs('today');
   applyDraftToInputs('calendar');

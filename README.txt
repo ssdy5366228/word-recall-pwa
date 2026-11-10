@@ -1,4 +1,4 @@
-Word Recall v6.0 Beta 4.9
+Word Recall v6.1 Beta 1
 
 唯一开发基线：v6.0 Beta 4.8。
 
